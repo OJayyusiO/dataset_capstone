@@ -1,0 +1,718 @@
+"""
+CARLA Dataset Capture Script
+
+Runs a long-duration traffic simulation at a user-configured camera position
+near a traffic light, continuously spawning vehicles with configurable class
+ratios, and captures YOLO-format training data.
+
+Usage:
+    1. Run setup_scenario.py to create a config YAML
+    2. Edit the YAML to set weather, spawn ratios, duration, etc.
+    3. python capture_dataset.py scenario_config.yaml
+"""
+
+import carla
+import yaml
+import sys
+import queue
+import cv2
+import numpy as np
+import random
+import argparse
+import math
+import time
+from pathlib import Path
+
+
+# =============================================================================
+# CLASS DEFINITIONS & BLUEPRINT MAPPING
+# =============================================================================
+
+CLASS_NAMES = {
+    0: 'car',
+    1: 'ambulance',
+    2: 'bus',
+    3: 'truck',
+    4: 'police_car',
+    5: 'fire_truck',
+    6: 'bike',
+}
+
+CLASS_NAME_TO_ID = {v: k for k, v in CLASS_NAMES.items()}
+
+BLUEPRINT_TO_CLASS = {
+    # Cars (class 0)
+    'vehicle.tesla.model3': 0,
+    'vehicle.audi.tt': 0,
+    'vehicle.audi.a2': 0,
+    'vehicle.audi.etron': 0,
+    'vehicle.bmw.grandtourer': 0,
+    'vehicle.chevrolet.impala': 0,
+    'vehicle.citroen.c3': 0,
+    'vehicle.dodge.charger_2020': 0,
+    'vehicle.ford.mustang': 0,
+    'vehicle.jeep.wrangler_rubicon': 0,
+    'vehicle.lincoln.mkz_2017': 0,
+    'vehicle.mercedes.coupe': 0,
+    'vehicle.micro.microlino': 0,
+    'vehicle.mini.cooper_s': 0,
+    'vehicle.nissan.micra': 0,
+    'vehicle.nissan.patrol': 0,
+    'vehicle.seat.leon': 0,
+    'vehicle.toyota.prius': 0,
+    # Ambulance (class 1)
+    'vehicle.ford.ambulance': 1,
+    # Bus (class 2)
+    'vehicle.mitsubishi.fusorosa': 2,
+    # Truck (class 3)
+    'vehicle.carlamotors.carlacola': 3,
+    'vehicle.tesla.cybertruck': 3,
+    # Police car (class 4)
+    'vehicle.dodge.charger_police': 4,
+    'vehicle.dodge.charger_police_2020': 4,
+    # Fire truck (class 5)
+    'vehicle.carlamotors.firetruck': 5,
+    # Bikes (class 6)
+    'vehicle.harley-davidson.low_rider': 6,
+    'vehicle.kawasaki.ninja': 6,
+    'vehicle.vespa.zx125': 6,
+    'vehicle.yamaha.yzf': 6,
+    'vehicle.bh.crossbike': 6,
+    'vehicle.diamondback.century': 6,
+    'vehicle.gazelle.omafiets': 6,
+}
+
+# Filtering thresholds for bounding boxes
+MAX_DISTANCE = 80.0
+MIN_BBOX_AREA = 200
+MIN_BBOX_SIDE = 10
+MIN_VISIBILITY = 0.4
+
+
+# =============================================================================
+# 3D-TO-2D BOUNDING BOX PROJECTION
+# =============================================================================
+
+def build_projection_matrix(w, h, fov):
+    """Build camera intrinsic matrix from image dimensions and FOV."""
+    focal = w / (2.0 * math.tan(fov * math.pi / 360.0))
+    K = np.array([
+        [focal, 0.0,   w / 2.0],
+        [0.0,   focal, h / 2.0],
+        [0.0,   0.0,   1.0],
+    ])
+    return K
+
+
+def get_image_point(world_point, K, world_to_camera):
+    """Project a single 3D world point to 2D image coordinates."""
+    point_world = np.array([world_point.x, world_point.y, world_point.z, 1.0])
+    point_cam = world_to_camera @ point_world
+
+    # UE4 coords -> standard camera coords
+    point_camera = np.array([point_cam[1], -point_cam[2], point_cam[0]])
+
+    depth = point_camera[2]
+    if depth <= 0:
+        return None, None, depth
+
+    img_point = K @ point_camera
+    u = img_point[0] / img_point[2]
+    v = img_point[1] / img_point[2]
+    return u, v, depth
+
+
+def get_2d_bbox(vehicle, camera, K, image_w, image_h):
+    """Compute 2D bounding box for a vehicle as seen from a camera.
+
+    Returns (x_min, y_min, x_max, y_max) in pixel coordinates, or None.
+    """
+    world_to_camera = np.array(camera.get_transform().get_inverse_matrix())
+
+    bb = vehicle.bounding_box
+    verts = bb.get_world_vertices(vehicle.get_transform())
+
+    us, vs = [], []
+    behind_count = 0
+    for vert in verts:
+        u, v, depth = get_image_point(vert, K, world_to_camera)
+        if depth <= 0:
+            behind_count += 1
+            continue
+        us.append(u)
+        vs.append(v)
+
+    if len(us) == 0:
+        return None
+    if behind_count > 4:
+        return None
+
+    raw_x_min, raw_x_max = min(us), max(us)
+    raw_y_min, raw_y_max = min(vs), max(vs)
+    raw_area = max(0, raw_x_max - raw_x_min) * max(0, raw_y_max - raw_y_min)
+
+    x_min = max(0, raw_x_min)
+    y_min = max(0, raw_y_min)
+    x_max = min(image_w, raw_x_max)
+    y_max = min(image_h, raw_y_max)
+
+    if x_min >= x_max or y_min >= y_max:
+        return None
+
+    clamped_area = (x_max - x_min) * (y_max - y_min)
+    if raw_area > 0 and (clamped_area / raw_area) < MIN_VISIBILITY:
+        return None
+    if (x_max - x_min) < MIN_BBOX_SIDE or (y_max - y_min) < MIN_BBOX_SIDE:
+        return None
+    if clamped_area < MIN_BBOX_AREA:
+        return None
+
+    return (x_min, y_min, x_max, y_max)
+
+
+def bbox_to_yolo(bbox, class_id, image_w, image_h):
+    """Convert pixel bbox to YOLO format: class_id x_center y_center w h (normalized)."""
+    x_min, y_min, x_max, y_max = bbox
+    x_center = ((x_min + x_max) / 2.0) / image_w
+    y_center = ((y_min + y_max) / 2.0) / image_h
+    w = (x_max - x_min) / image_w
+    h = (y_max - y_min) / image_h
+    return f"{class_id} {x_center:.6f} {y_center:.6f} {w:.6f} {h:.6f}"
+
+
+# =============================================================================
+# OUTPUT / FILE I/O
+# =============================================================================
+
+def setup_output_dirs(output_dir):
+    """Create the YOLO dataset directory structure."""
+    dirs = {
+        'images_train': output_dir / 'images' / 'train',
+        'images_val': output_dir / 'images' / 'val',
+        'labels_train': output_dir / 'labels' / 'train',
+        'labels_val': output_dir / 'labels' / 'val',
+    }
+    for d in dirs.values():
+        d.mkdir(parents=True, exist_ok=True)
+    return dirs
+
+
+def save_frame(image_array, labels, frame_id, split, dirs):
+    """Save an image and its YOLO label file."""
+    img_path = dirs[f'images_{split}'] / f'{frame_id}.png'
+    lbl_path = dirs[f'labels_{split}'] / f'{frame_id}.txt'
+
+    cv2.imwrite(str(img_path), image_array)
+    with open(lbl_path, 'w') as f:
+        for label in labels:
+            f.write(label + '\n')
+
+
+def write_data_yaml(output_dir):
+    """Write the ultralytics-compatible data.yaml file."""
+    yaml_content = f"""path: {output_dir.resolve().as_posix()}
+train: images/train
+val: images/val
+
+names:
+  0: car
+  1: ambulance
+  2: bus
+  3: truck
+  4: police_car
+  5: fire_truck
+  6: bike
+"""
+    yaml_path = output_dir / 'data.yaml'
+    with open(yaml_path, 'w') as f:
+        f.write(yaml_content)
+    print(f"Wrote {yaml_path}")
+
+
+# =============================================================================
+# VEHICLE SPAWNING & LIFECYCLE
+# =============================================================================
+
+def get_available_blueprints(bp_lib):
+    """Check which blueprints from our mapping actually exist in this CARLA build."""
+    available = {}
+    for bp_name, class_id in BLUEPRINT_TO_CLASS.items():
+        results = bp_lib.filter(bp_name)
+        if len(results) > 0:
+            available[bp_name] = class_id
+    return available
+
+
+def build_class_blueprint_map(available_bps):
+    """Group available blueprints by class_id."""
+    class_bps = {}
+    for bp_name, class_id in available_bps.items():
+        class_bps.setdefault(class_id, []).append(bp_name)
+    return class_bps
+
+
+def compute_target_counts(ratios, max_vehicles):
+    """Convert ratio dict to target vehicle counts per class.
+
+    Scales the ratios so total equals max_vehicles.
+    """
+    total_ratio = sum(ratios.values())
+    if total_ratio == 0:
+        return {}
+    targets = {}
+    for class_name, ratio in ratios.items():
+        class_id = CLASS_NAME_TO_ID.get(class_name)
+        if class_id is not None:
+            targets[class_id] = max(1, round(ratio / total_ratio * max_vehicles))
+    return targets
+
+
+def spawn_to_fill(world, bp_lib, tm_port, class_bps, target_counts,
+                  current_vehicles, spawn_points):
+    """Spawn vehicles to reach target counts per class.
+
+    Args:
+        current_vehicles: list of (actor, class_id) - will be modified in place
+        spawn_points: list of carla.Transform spawn points
+
+    Returns:
+        Number of vehicles spawned this call.
+    """
+    # Count current alive vehicles per class
+    current_counts = {}
+    alive = []
+    for actor, class_id in current_vehicles:
+        if actor.is_alive:
+            current_counts[class_id] = current_counts.get(class_id, 0) + 1
+            alive.append((actor, class_id))
+        # Dead actors are silently dropped
+
+    current_vehicles.clear()
+    current_vehicles.extend(alive)
+
+    # Build spawn list of what's needed
+    spawn_list = []
+    for class_id, target in target_counts.items():
+        current = current_counts.get(class_id, 0)
+        needed = target - current
+        bps = class_bps.get(class_id, [])
+        if not bps or needed <= 0:
+            continue
+        for i in range(needed):
+            bp_name = bps[i % len(bps)]
+            spawn_list.append((bp_name, class_id))
+
+    random.shuffle(spawn_list)
+
+    # Filter out spawn points that are too close to existing vehicles
+    occupied_locations = [
+        actor.get_transform().location for actor, _ in current_vehicles
+        if actor.is_alive
+    ]
+    min_spawn_gap = 8.0  # meters - avoid spawning on top of existing vehicles
+
+    available_sp = []
+    for sp in spawn_points:
+        too_close = False
+        for occ in occupied_locations:
+            if sp.location.distance(occ) < min_spawn_gap:
+                too_close = True
+                break
+        if not too_close:
+            available_sp.append(sp)
+
+    random.shuffle(available_sp)
+
+    spawned = 0
+    sp_idx = 0
+    for bp_name, class_id in spawn_list:
+        if sp_idx >= len(available_sp):
+            break
+
+        bp = bp_lib.find(bp_name)
+        if bp.has_attribute('color'):
+            color = random.choice(bp.get_attribute('color').recommended_values)
+            bp.set_attribute('color', color)
+
+        actor = world.try_spawn_actor(bp, available_sp[sp_idx])
+        sp_idx += 1
+
+        if actor is not None:
+            actor.set_autopilot(True, tm_port)
+            current_vehicles.append((actor, class_id))
+            # Track this new location so subsequent spawns in this batch also avoid it
+            occupied_locations.append(actor.get_transform().location)
+            spawned += 1
+
+    return spawned
+
+
+def despawn_far_vehicles(current_vehicles, reference_location, despawn_distance):
+    """Remove vehicles that are too far from the reference point (traffic light)."""
+    removed = 0
+    alive = []
+    for actor, class_id in current_vehicles:
+        if not actor.is_alive:
+            continue
+        dist = actor.get_transform().location.distance(reference_location)
+        if dist > despawn_distance:
+            actor.destroy()
+            removed += 1
+        else:
+            alive.append((actor, class_id))
+
+    current_vehicles.clear()
+    current_vehicles.extend(alive)
+    return removed
+
+
+# =============================================================================
+# CAMERA & WEATHER
+# =============================================================================
+
+def spawn_camera(world, bp_lib, camera_config):
+    """Spawn an RGB camera from config."""
+    cam_loc = carla.Location(
+        x=camera_config['location']['x'],
+        y=camera_config['location']['y'],
+        z=camera_config['location']['z']
+    )
+    cam_rot = carla.Rotation(
+        pitch=camera_config['rotation']['pitch'],
+        yaw=camera_config['rotation']['yaw'],
+        roll=camera_config['rotation']['roll']
+    )
+    cam_tf = carla.Transform(cam_loc, cam_rot)
+
+    cam_bp = bp_lib.find('sensor.camera.rgb')
+    cam_bp.set_attribute('image_size_x', str(camera_config.get('image_width', 1280)))
+    cam_bp.set_attribute('image_size_y', str(camera_config.get('image_height', 720)))
+    cam_bp.set_attribute('fov', str(camera_config.get('fov', 70)))
+    cam_bp.set_attribute('motion_blur_intensity', '0.0')
+    cam_bp.set_attribute('exposure_mode', 'manual')
+    cam_bp.set_attribute('exposure_compensation', '-1.5')
+    cam_bp.set_attribute('exposure_min_bright', '0.5')
+    cam_bp.set_attribute('exposure_max_bright', '2.0')
+    cam_bp.set_attribute('gamma', '2.2')
+    cam_bp.set_attribute('lens_flare_intensity', '0.1')
+    cam_bp.set_attribute('bloom_intensity', '0.3')
+
+    camera = world.spawn_actor(cam_bp, cam_tf)
+    return camera
+
+
+def apply_weather(world, weather_config):
+    """Apply weather settings from config."""
+    weather = carla.WeatherParameters(
+        cloudiness=weather_config.get('cloudiness', 10.0),
+        precipitation=weather_config.get('precipitation', 0.0),
+        sun_altitude_angle=weather_config.get('sun_altitude_angle', 45.0),
+        fog_density=weather_config.get('fog_density', 0.0),
+        wetness=weather_config.get('wetness', 0.0)
+    )
+    world.set_weather(weather)
+
+
+# =============================================================================
+# MAIN CAPTURE LOOP
+# =============================================================================
+
+def run_capture(config_path):
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+
+    # Extract config sections
+    camera_config = config['camera']
+    weather_config = config.get('weather', {})
+    sim_config = config.get('simulation', {})
+    spawn_config = config.get('spawn', {})
+    output_config = config.get('output', {})
+
+    total_frames = sim_config.get('total_frames', 5000)
+    capture_interval = sim_config.get('capture_interval', 10)
+    warmup_frames = sim_config.get('warmup_frames', 100)
+    train_ratio = sim_config.get('train_ratio', 0.8)
+    fixed_delta = sim_config.get('fixed_delta_seconds', 0.05)
+
+    max_vehicles = spawn_config.get('max_vehicles', 30)
+    respawn_interval = spawn_config.get('respawn_interval', 50)
+    despawn_distance = spawn_config.get('despawn_distance', 150.0)
+    ratios = spawn_config.get('ratios', {
+        'car': 15, 'ambulance': 2, 'bus': 2, 'truck': 3,
+        'police_car': 2, 'fire_truck': 1, 'bike': 4
+    })
+
+    image_w = camera_config.get('image_width', 1280)
+    image_h = camera_config.get('image_height', 720)
+    fov = camera_config.get('fov', 70)
+
+    output_dir = Path(output_config.get('directory', './dataset_output'))
+    dirs = setup_output_dirs(output_dir)
+    K = build_projection_matrix(image_w, image_h, fov)
+
+    target_counts = compute_target_counts(ratios, max_vehicles)
+
+    # Print summary
+    expected_captures = max(0, (total_frames - warmup_frames)) // capture_interval
+    print("=" * 60)
+    print("CARLA Dataset Capture")
+    print("=" * 60)
+    print(f"Scenario: {config.get('scenario_name', 'unnamed')}")
+    print(f"Output: {output_dir.resolve()}")
+    print(f"Frames: {total_frames} total, {warmup_frames} warmup")
+    print(f"Capture every {capture_interval} frames -> ~{expected_captures} images")
+    print(f"Train/Val split: {train_ratio:.0%}/{1-train_ratio:.0%}")
+    print(f"Max vehicles: {max_vehicles}, spawn radius: {spawn_config.get('spawn_radius', 100.0)}m")
+    print(f"Spawn ratios: {ratios}")
+    print(f"Target counts: {{{', '.join(f'{CLASS_NAMES[k]}: {v}' for k, v in target_counts.items())}}}")
+    print(f"Weather: sun={weather_config.get('sun_altitude_angle', 45)}, "
+          f"cloud={weather_config.get('cloudiness', 10)}, "
+          f"rain={weather_config.get('precipitation', 0)}, "
+          f"fog={weather_config.get('fog_density', 0)}")
+    print("=" * 60)
+
+    # Connect to CARLA
+    client = carla.Client('localhost', 2000)
+    client.set_timeout(10.0)
+    world = client.get_world()
+
+    bp_lib = world.get_blueprint_library()
+    all_spawn_points = world.get_map().get_spawn_points()
+
+    # Enable synchronous mode
+    original_settings = world.get_settings()
+    settings = world.get_settings()
+    settings.synchronous_mode = True
+    settings.fixed_delta_seconds = fixed_delta
+    settings.substepping = True
+    settings.max_substep_delta_time = 0.01
+    settings.max_substeps = 10
+    world.apply_settings(settings)
+
+    traffic_manager = client.get_trafficmanager()
+    traffic_manager.set_synchronous_mode(True)
+    traffic_manager.set_random_device_seed(42)
+    random.seed(42)
+    np.random.seed(42)
+    tm_port = traffic_manager.get_port()
+
+    # Get available blueprints and group by class
+    available_bps = get_available_blueprints(bp_lib)
+    class_bps = build_class_blueprint_map(available_bps)
+
+    missing_classes = [CLASS_NAMES[cid] for cid in target_counts if cid not in class_bps]
+    if missing_classes:
+        print(f"WARNING: No blueprints found for: {missing_classes}")
+
+    image_queue = queue.Queue()
+    current_vehicles = []  # list of (actor, class_id)
+    actor_list = []
+
+    try:
+        # Apply weather
+        apply_weather(world, weather_config)
+        print("Weather applied")
+
+        # Spawn camera
+        camera = spawn_camera(world, bp_lib, camera_config)
+        actor_list.append(camera)
+        camera.listen(image_queue.put)
+        camera_location = camera.get_transform().location
+        print(f"Camera spawned at ({camera_location.x:.1f}, {camera_location.y:.1f}, {camera_location.z:.1f})")
+
+        # Find traffic light and filter spawn points nearby
+        spawn_radius = spawn_config.get('spawn_radius', 100.0)
+        light_id = config.get('traffic_light', {}).get('id')
+        light_location = None
+        if light_id:
+            traffic_lights = list(world.get_actors().filter('traffic.traffic_light'))
+            selected_light = next((l for l in traffic_lights if l.id == light_id), None)
+            if selected_light:
+                light_location = selected_light.get_transform().location
+                print(f"Traffic light {light_id} found at ({light_location.x:.1f}, {light_location.y:.1f})")
+            else:
+                print(f"WARNING: Traffic light {light_id} not found, using camera location for spawn filtering")
+
+        # Filter spawn points to those within spawn_radius of the traffic light (or camera)
+        reference_location = light_location if light_location else camera_location
+        spawn_points = [
+            sp for sp in all_spawn_points
+            if sp.location.distance(reference_location) <= spawn_radius
+        ]
+
+        if len(spawn_points) == 0:
+            print(f"WARNING: No spawn points within {spawn_radius}m, using all spawn points")
+            spawn_points = all_spawn_points
+        else:
+            print(f"Using {len(spawn_points)}/{len(all_spawn_points)} spawn points within {spawn_radius}m of traffic light")
+
+        # Initial vehicle spawn
+        spawned = spawn_to_fill(world, bp_lib, tm_port, class_bps,
+                                target_counts, current_vehicles, spawn_points)
+        print(f"Initial spawn: {spawned} vehicles")
+
+        # Configure traffic manager for spawned vehicles
+        for v, cls_id in current_vehicles:
+            if cls_id == 6:  # bikes go slower
+                traffic_manager.vehicle_percentage_speed_difference(v, 50.0)
+            else:
+                traffic_manager.vehicle_percentage_speed_difference(v, 30.0)
+
+        frame_counter = 0
+        captured_count = 0
+        start_time = time.time()
+
+        print(f"\nStarting simulation ({total_frames} frames)...")
+        print("Press Ctrl+C to stop early\n")
+
+        for frame in range(total_frames):
+            world.tick()
+
+            # Drain image queue (keep only latest)
+            latest_image = None
+            try:
+                while True:
+                    latest_image = image_queue.get_nowait()
+            except queue.Empty:
+                pass
+
+            # Respawn cycle: despawn far vehicles, spawn new ones to fill
+            if frame > 0 and frame % respawn_interval == 0:
+                removed = despawn_far_vehicles(current_vehicles, reference_location,
+                                               despawn_distance)
+                spawned = spawn_to_fill(world, bp_lib, tm_port, class_bps,
+                                        target_counts, current_vehicles, spawn_points)
+                # Configure new vehicles
+                for v, cls_id in current_vehicles:
+                    try:
+                        if cls_id == 6:
+                            traffic_manager.vehicle_percentage_speed_difference(v, 50.0)
+                        else:
+                            traffic_manager.vehicle_percentage_speed_difference(v, 30.0)
+                    except RuntimeError:
+                        pass  # vehicle may have been destroyed between check and configure
+
+            # Skip warmup frames
+            if frame < warmup_frames:
+                if frame == warmup_frames - 1:
+                    print(f"Warmup complete ({warmup_frames} frames)")
+                continue
+
+            # Capture at interval
+            if (frame - warmup_frames) % capture_interval != 0:
+                continue
+
+            if latest_image is None:
+                continue
+
+            # Convert image
+            img_data = np.array(latest_image.raw_data)
+            img = img_data.reshape((image_h, image_w, 4))[:, :, :3].copy()
+
+            # Compute YOLO labels
+            labels = []
+            for vehicle, class_id in current_vehicles:
+                if not vehicle.is_alive:
+                    continue
+                dist = vehicle.get_transform().location.distance(camera_location)
+                if dist > MAX_DISTANCE:
+                    continue
+                bbox = get_2d_bbox(vehicle, camera, K, image_w, image_h)
+                if bbox is None:
+                    continue
+                yolo_label = bbox_to_yolo(bbox, class_id, image_w, image_h)
+                labels.append(yolo_label)
+
+            # Skip frames with no detections
+            if len(labels) == 0:
+                continue
+
+            # Train/val split
+            split = 'train' if random.random() < train_ratio else 'val'
+            scene_name = config.get('scenario_name', 'scene')
+            frame_id = f"{scene_name}_{frame_counter:06d}"
+            save_frame(img, labels, frame_id, split, dirs)
+            frame_counter += 1
+            captured_count += 1
+
+            # Progress update every 50 captures
+            if captured_count % 50 == 0:
+                elapsed = time.time() - start_time
+                fps = frame / max(elapsed, 0.001)
+                alive_count = sum(1 for v, _ in current_vehicles if v.is_alive)
+                print(f"  Frame {frame}/{total_frames} | "
+                      f"Captured: {captured_count} | "
+                      f"Vehicles: {alive_count} | "
+                      f"{fps:.1f} sim fps")
+
+        print(f"\nSimulation complete ({total_frames} frames)")
+
+    except KeyboardInterrupt:
+        print("\n\nStopped by user")
+
+    finally:
+        # Cleanup
+        camera.stop()
+        for actor in actor_list:
+            if actor.is_alive:
+                actor.destroy()
+        for actor, _ in current_vehicles:
+            if actor.is_alive:
+                actor.destroy()
+
+        # Restore settings
+        world.apply_settings(original_settings)
+        traffic_manager.set_synchronous_mode(False)
+
+    # Write data.yaml
+    write_data_yaml(output_dir)
+
+    elapsed = time.time() - start_time
+    print("\n" + "=" * 60)
+    print(f"Dataset capture complete!")
+    print(f"Total captured frames: {captured_count}")
+    print(f"Time elapsed: {elapsed/60:.1f} minutes")
+    print(f"Output: {output_dir.resolve()}")
+    print("=" * 60)
+
+    # Print label distribution
+    print("\nLabel distribution:")
+    for split in ['train', 'val']:
+        label_dir = output_dir / 'labels' / split
+        counts = {i: 0 for i in CLASS_NAMES}
+        total_labels = 0
+        for label_file in label_dir.glob('*.txt'):
+            with open(label_file) as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if parts:
+                        cls = int(parts[0])
+                        counts[cls] = counts.get(cls, 0) + 1
+                        total_labels += 1
+        print(f"  {split}: {total_labels} annotations")
+        for cls_id, name in CLASS_NAMES.items():
+            print(f"    {name}: {counts.get(cls_id, 0)}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Capture YOLO dataset from CARLA scenario')
+    parser.add_argument('config', type=str, help='Path to scenario config YAML file')
+    args = parser.parse_args()
+
+    config_path = Path(args.config)
+    if not config_path.exists():
+        print(f"Config file not found: {config_path}")
+        sys.exit(1)
+
+    try:
+        run_capture(config_path)
+    except KeyboardInterrupt:
+        print("\n\nInterrupted by user")
+    except Exception as e:
+        print(f"\nError: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+if __name__ == '__main__':
+    main()

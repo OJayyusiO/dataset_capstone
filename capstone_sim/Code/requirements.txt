@@ -1,0 +1,10 @@
+# CARLA dataset capture dependencies
+# Python 3.11 recommended
+#
+# Note: carla must match your CARLA simulator version (e.g. 0.9.16)
+# Install with: pip install -r requirements.txt
+
+carla==0.9.16
+numpy>=1.26,<2.0
+opencv-python>=4.8
+PyYAML>=6.0
