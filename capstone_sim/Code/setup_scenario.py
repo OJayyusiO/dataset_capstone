@@ -15,6 +15,7 @@ Usage:
 import carla
 import yaml
 import sys
+from pathlib import Path
 
 
 def main():
@@ -146,8 +147,9 @@ def main():
         }
     }
 
-    # Save config
-    output_path = 'scenario_config.yaml'
+    # Save config next to this script
+    script_dir = Path(__file__).resolve().parent
+    output_path = script_dir / 'scenario_config.yaml'
     with open(output_path, 'w') as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
 

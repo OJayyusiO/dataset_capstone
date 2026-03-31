@@ -40,6 +40,13 @@ conda env create -f capstone_sim/environment.yml
 conda activate capstone
 ```
 
+To use a different environment name, run:
+
+```bash
+conda env create -f capstone_sim/environment.yml -n your_env_name
+conda activate your_env_name
+```
+
 ### 4. Launch CARLA
 
 For best visual quality, use the provided batch file:
@@ -99,7 +106,11 @@ This runs a long simulation and outputs a YOLO-format dataset with labeled image
 
 ## Configuration
 
-After running `setup_scenario.py`, edit the generated `scenario_config.yaml` to customize:
+After running `setup_scenario.py`, edit the generated `scenario_config.yaml` to customize.
+
+**Important:** Change the `scenario_name` field in the YAML before each capture run. The scenario name is used to name the output images, so reusing the same name will overwrite previous data.
+
+
 
 **Weather:**
 ```yaml
