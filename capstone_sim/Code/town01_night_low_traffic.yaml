@@ -1,4 +1,4 @@
-scenario_name: map5_day_hightraffic
+scenario_name: town01_night_low_traffic
 camera:
   location:
     x: 339.62
@@ -16,27 +16,27 @@ traffic_light:
 weather:
   cloudiness: 40.0
   precipitation: 0.0
-  sun_altitude_angle: -30.0
+  sun_altitude_angle: -30
   fog_density: 0.0
   wetness: 0.0
 simulation:
   total_frames: 5000
-  capture_interval: 10
+  capture_interval: 2
   warmup_frames: 100
   train_ratio: 0.8
   fixed_delta_seconds: 0.05
 spawn:
-  max_vehicles: 60
-  spawn_radius: 70.0
-  respawn_interval: 20
-  despawn_distance: 90
+  max_vehicles: 10
+  spawn_radius: 80.0
+  respawn_interval: 100
+  despawn_distance: 100.0
   ratios:
-    car: 13
-    ambulance: 3
-    bus: 2
+    car: 15
+    ambulance: 2
+    bus: 1
     truck: 3
     police_car: 2
     fire_truck: 1
-    bike: 3
+    bike: 4
 output:
   directory: ./dataset_output

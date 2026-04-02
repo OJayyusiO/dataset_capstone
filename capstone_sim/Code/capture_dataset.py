@@ -429,7 +429,7 @@ def run_capture(config_path):
     output_config = config.get('output', {})
 
     total_frames = sim_config.get('total_frames', 5000)
-    capture_interval = sim_config.get('capture_interval', 10)
+    capture_interval = sim_config.get('capture_interval', 2)
     warmup_frames = sim_config.get('warmup_frames', 100)
     train_ratio = sim_config.get('train_ratio', 0.8)
     fixed_delta = sim_config.get('fixed_delta_seconds', 0.05)
@@ -517,6 +517,7 @@ def run_capture(config_path):
         camera = spawn_camera(world, bp_lib, camera_config)
         actor_list.append(camera)
         camera.listen(image_queue.put)
+        world.tick()  # Tick so CARLA updates the camera transform
         camera_location = camera.get_transform().location
         print(f"Camera spawned at ({camera_location.x:.1f}, {camera_location.y:.1f}, {camera_location.z:.1f})")
 
@@ -546,23 +547,13 @@ def run_capture(config_path):
         else:
             print(f"Using {len(spawn_points)}/{len(all_spawn_points)} spawn points within {spawn_radius}m of traffic light")
 
-        # Initial vehicle spawn
-        spawned = spawn_to_fill(world, bp_lib, tm_port, class_bps,
-                                target_counts, current_vehicles, spawn_points)
-        print(f"Initial spawn: {spawned} vehicles")
-
-        # Configure traffic manager for spawned vehicles
-        for v, cls_id in current_vehicles:
-            if cls_id == 6:  # bikes go slower
-                traffic_manager.vehicle_percentage_speed_difference(v, 50.0)
-            else:
-                traffic_manager.vehicle_percentage_speed_difference(v, 30.0)
-
         frame_counter = 0
         captured_count = 0
+        vehicles_spawned = False
         start_time = time.time()
 
         print(f"\nStarting simulation ({total_frames} frames)...")
+        print(f"Warmup: {warmup_frames} frames (capturing background images with no vehicles)")
         print("Press Ctrl+C to stop early\n")
 
         for frame in range(total_frames):
@@ -575,6 +566,33 @@ def run_capture(config_path):
                     latest_image = image_queue.get_nowait()
             except queue.Empty:
                 pass
+
+            # Capture background images during warmup (no vehicles present)
+            if frame < warmup_frames:
+                if (frame % capture_interval == 0) and latest_image is not None:
+                    img_data = np.array(latest_image.raw_data)
+                    img = img_data.reshape((image_h, image_w, 4))[:, :, :3].copy()
+                    split = 'train' if random.random() < train_ratio else 'val'
+                    scene_name = config.get('scenario_name', 'scene')
+                    frame_id = f"{scene_name}_{frame_counter:06d}"
+                    save_frame(img, [], frame_id, split, dirs)
+                    frame_counter += 1
+                    captured_count += 1
+                if frame == warmup_frames - 1:
+                    print(f"Warmup complete ({warmup_frames} frames, {captured_count} background images captured)")
+                continue
+
+            # Spawn vehicles after warmup
+            if not vehicles_spawned:
+                spawned = spawn_to_fill(world, bp_lib, tm_port, class_bps,
+                                        target_counts, current_vehicles, spawn_points)
+                print(f"Spawned {spawned} vehicles")
+                for v, cls_id in current_vehicles:
+                    if cls_id == 6:  # bikes go slower
+                        traffic_manager.vehicle_percentage_speed_difference(v, 50.0)
+                    else:
+                        traffic_manager.vehicle_percentage_speed_difference(v, 30.0)
+                vehicles_spawned = True
 
             # Respawn cycle: despawn far vehicles, spawn new ones to fill
             if frame > 0 and frame % respawn_interval == 0:
@@ -591,12 +609,6 @@ def run_capture(config_path):
                             traffic_manager.vehicle_percentage_speed_difference(v, 30.0)
                     except RuntimeError:
                         pass  # vehicle may have been destroyed between check and configure
-
-            # Skip warmup frames
-            if frame < warmup_frames:
-                if frame == warmup_frames - 1:
-                    print(f"Warmup complete ({warmup_frames} frames)")
-                continue
 
             # Capture at interval
             if (frame - warmup_frames) % capture_interval != 0:
@@ -623,8 +635,11 @@ def run_capture(config_path):
                 yolo_label = bbox_to_yolo(bbox, class_id, image_w, image_h)
                 labels.append(yolo_label)
 
-            # Skip frames with no detections
+            # Skip frames with no detections (background images are captured during warmup)
             if len(labels) == 0:
+                if frame % 100 == 0:
+                    alive_count = sum(1 for v, _ in current_vehicles if v.is_alive)
+                    print(f"  Frame {frame}: no vehicles in view (alive: {alive_count})")
                 continue
 
             # Train/val split

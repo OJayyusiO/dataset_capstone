@@ -122,7 +122,7 @@ def main():
         },
         'simulation': {
             'total_frames': 5000,
-            'capture_interval': 10,
+            'capture_interval': 2,
             'warmup_frames': 100,
             'train_ratio': 0.8,
             'fixed_delta_seconds': 0.05
