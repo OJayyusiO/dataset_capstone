@@ -130,6 +130,8 @@ def main():
         'spawn': {
             'max_vehicles': 30,
             'spawn_radius': 100.0,
+            'radius_center': 'traffic_light',
+            'spawn_points': [],
             'respawn_interval': 50,
             'despawn_distance': 150.0,
             'ratios': {
