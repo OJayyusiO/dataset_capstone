@@ -534,18 +534,44 @@ def run_capture(config_path):
             else:
                 print(f"WARNING: Traffic light {light_id} not found, using camera location for spawn filtering")
 
-        # Filter spawn points to those within spawn_radius of the traffic light (or camera)
-        reference_location = light_location if light_location else camera_location
-        spawn_points = [
-            sp for sp in all_spawn_points
-            if sp.location.distance(reference_location) <= spawn_radius
-        ]
-
-        if len(spawn_points) == 0:
-            print(f"WARNING: No spawn points within {spawn_radius}m, using all spawn points")
-            spawn_points = all_spawn_points
+        # Reference location for spawn radius filtering and despawning
+        radius_center = spawn_config.get('radius_center', 'traffic_light')
+        if radius_center == 'camera':
+            reference_location = camera_location
         else:
-            print(f"Using {len(spawn_points)}/{len(all_spawn_points)} spawn points within {spawn_radius}m of traffic light")
+            reference_location = light_location if light_location else camera_location
+
+        # Filter spawn points: use explicit list if provided, otherwise radius-based
+        raw_spawn_points = spawn_config.get('spawn_points')
+        # Parse spawn points - supports integers and "start-end" range strings
+        selected_indices = []
+        if raw_spawn_points:
+            for entry in raw_spawn_points:
+                if isinstance(entry, int):
+                    selected_indices.append(entry)
+                elif isinstance(entry, str) and '-' in entry:
+                    parts = entry.split('-')
+                    start, end = int(parts[0]), int(parts[1])
+                    selected_indices.extend(range(start, end + 1))
+        if selected_indices:
+            spawn_points = []
+            for idx in selected_indices:
+                if 0 <= idx < len(all_spawn_points):
+                    spawn_points.append(all_spawn_points[idx])
+                else:
+                    print(f"WARNING: Spawn point index {idx} out of range (0-{len(all_spawn_points)-1})")
+            print(f"Using {len(spawn_points)} manually selected spawn points")
+        else:
+            ref_label = 'camera' if radius_center == 'camera' else ('traffic light' if light_location else 'camera')
+            spawn_points = [
+                sp for sp in all_spawn_points
+                if sp.location.distance(reference_location) <= spawn_radius
+            ]
+            if len(spawn_points) == 0:
+                print(f"WARNING: No spawn points within {spawn_radius}m, using all spawn points")
+                spawn_points = all_spawn_points
+            else:
+                print(f"Using {len(spawn_points)}/{len(all_spawn_points)} spawn points within {spawn_radius}m of {ref_label}")
 
         frame_counter = 0
         captured_count = 0

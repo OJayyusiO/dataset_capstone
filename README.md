@@ -36,20 +36,19 @@ capstone_sim/
 ### 3. Create the conda environment
 
 ```bash
-conda env create -f capstone_sim/environment.yml
-conda activate capstone
-```
-
-To use a different environment name, run:
-
-```bash
 conda env create -f capstone_sim/environment.yml -n your_env_name
 conda activate your_env_name
 ```
 
 ### 4. Launch CARLA
 
-For best visual quality, launch with these flags:
+For best visual quality, use the provided batch file:
+
+```powershell
+.\capstone_sim\Code\launch_carla_quality.bat
+```
+
+Or launch manually with quality flags:
 
 ```powershell
 cd capstone_sim\CARLA_0.9.16
@@ -180,3 +179,4 @@ dataset_output/
 | `switch_map.py` | Load a CARLA map by name |
 | `setup_scenario.py` | Interactive tool to position camera and select traffic light |
 | `capture_dataset.py` | Run simulation and capture YOLO-format dataset |
+| `launch_carla_quality.bat` | Launch CARLA with high quality rendering settings |
