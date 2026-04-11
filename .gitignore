@@ -2,3 +2,5 @@
 dataset_output/
 dataset_output (old)/
 CARLA_0.9.16/
+runs/
+dataset_output.zip

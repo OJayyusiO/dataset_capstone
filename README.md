@@ -172,11 +172,53 @@ dataset_output/
 
 ---
 
+## Training
+
+### 1. Install training dependencies
+
+Install PyTorch with CUDA support first, then ultralytics:
+
+```bash
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+pip install ultralytics
+```
+
+### 2. Train the model
+
+```bash
+python capstone_sim/models/yolov11/train.py --data capstone_sim/Code/dataset_output/data.yaml
+```
+
+**Options:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--data` | (required) | Path to `data.yaml` in your dataset |
+| `--model` | `yolo11n.pt` | Model size: `yolo11n.pt` (nano), `yolo11s.pt` (small), `yolo11m.pt` (medium) |
+| `--epochs` | `100` | Number of training epochs |
+| `--batch` | `16` | Batch size (reduce to 8 if running out of VRAM) |
+| `--imgsz` | `640` | Input image size |
+| `--name` | auto | Name for the training run |
+| `--resume` | none | Path to checkpoint to resume training |
+
+Results are saved to `capstone_sim/models/yolov11/runs/`.
+
+### 3. Use the trained model
+
+```python
+from ultralytics import YOLO
+model = YOLO('path/to/runs/train/weights/best.pt')
+results = model.predict('image.jpg')
+```
+
+---
+
 ## Scripts Reference
 
 | Script | Purpose |
 |--------|---------|
 | `switch_map.py` | Load a CARLA map by name |
 | `setup_scenario.py` | Interactive tool to position camera and select traffic light |
+| `visualize_spawns.py` | Draw numbered spawn point markers in the CARLA viewport |
 | `capture_dataset.py` | Run simulation and capture YOLO-format dataset |
-| `launch_carla_quality.bat` | Launch CARLA with high quality rendering settings |
+| `train.py` | Train YOLOv11 on captured dataset |
