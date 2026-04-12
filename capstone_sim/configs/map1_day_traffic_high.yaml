@@ -1,0 +1,42 @@
+scenario_name: map1_day_traffic_high
+camera:
+  location:
+    x: -61.5
+    y: 126.68
+    z: 5.39
+  rotation:
+    pitch: -6.81
+    yaw: -45.29
+    roll: 0.0
+  image_width: 1280
+  image_height: 720
+  fov: 70
+traffic_light:
+  id: 21
+weather:
+  cloudiness: 40.0
+  precipitation: 0.0
+  sun_altitude_angle: 25.0
+  fog_density: 0.0
+  wetness: 0.0
+simulation:
+  total_frames: 30000
+  capture_interval: 10
+  warmup_frames: 100
+  train_ratio: 0.8
+  fixed_delta_seconds: 0.05
+spawn:
+  max_vehicles: 60
+  spawn_radius: 70.0
+  respawn_interval: 20
+  despawn_distance: 90
+  ratios:
+    car: 13
+    ambulance: 3
+    bus: 2
+    truck: 3
+    police_car: 2
+    fire_truck: 1
+    bike: 3
+output:
+  directory: ./dataset_output

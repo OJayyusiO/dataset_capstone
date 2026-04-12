@@ -1,0 +1,14 @@
+# Capstone project dependencies
+# Python 3.11 recommended
+#
+# Install PyTorch with CUDA first:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# Then install the rest:
+#   pip install -r requirements.txt
+
+carla==0.9.16
+numpy>=1.26,<2.0
+opencv-python>=4.8
+PyYAML>=6.0
+ultralytics>=8.3
+matplotlib

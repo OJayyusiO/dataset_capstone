@@ -1,6 +1,0 @@
-# YOLOv11 training dependencies
-# Install PyTorch with CUDA first:
-#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-# Then install ultralytics:
-#   pip install ultralytics>=8.3
-ultralytics>=8.3

@@ -4,6 +4,24 @@ A tool for generating YOLO-format object detection datasets using the CARLA simu
 
 ---
 
+## Project Structure
+
+```
+capstone_sim/
+├── configs/              # scenario YAML configs
+├── scripts/
+│   ├── capture/          # capture_dataset.py, record_test.py, setup_scenario.py
+│   ├── train/            # train.py
+│   ├── evaluate/         # evaluate_model.py, visualize_metrics.py
+│   └── utils/            # switch_map.py, visualize_spawns.py, shared modules
+├── models/
+│   └── yolov11/          # model weights and training runs
+├── environment.yml
+└── requirements.txt
+```
+
+---
+
 ## Prerequisites
 
 - [CARLA 0.9.16](https://github.com/carla-simulator/carla/releases/tag/0.9.16/) (Windows)
@@ -22,11 +40,12 @@ cd dataset_capstone
 
 ### 2. Install CARLA
 
-Download the **CARLA 0.9.16 Windows** zip and extract it into the `capstone_sim/` folder. Your directory should look like this:
+Download the **CARLA 0.9.16 Windows** zip and extract it into the `capstone_sim/` folder:
 
 ```
 capstone_sim/
-├── Code/
+├── configs/
+├── scripts/
 ├── environment.yml
 └── CARLA_0.9.16/
     ├── CarlaUE4.exe
@@ -36,19 +55,27 @@ capstone_sim/
 ### 3. Create the conda environment
 
 ```bash
+conda env create -f capstone_sim/environment.yml
+conda activate capstone
+```
+
+To use a different environment name:
+
+```bash
 conda env create -f capstone_sim/environment.yml -n your_env_name
 conda activate your_env_name
 ```
 
-### 4. Launch CARLA
+Install PyTorch with CUDA support and the remaining dependencies:
 
-For best visual quality, use the provided batch file:
-
-```powershell
-.\capstone_sim\Code\launch_carla_quality.bat
+```bash
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+pip install -r capstone_sim/requirements.txt
 ```
 
-Or launch manually with quality flags:
+### 4. Launch CARLA
+
+For best visual quality:
 
 ```powershell
 cd capstone_sim\CARLA_0.9.16
@@ -57,53 +84,60 @@ CarlaUE4.exe -quality-level=Epic -ResX=1920 -ResY=1080 -windowed
 
 ---
 
-## Usage
-
-There are three steps: (1) switch to the map you want, (2) set up a camera position and pick a traffic light, (3) capture the dataset.
-
+## Data Capture
 
 ### Step 1: Load a map
 
 ```bash
-python capstone_sim/Code/switch_map.py Town05
+python capstone_sim/scripts/utils/switch_map.py Town05
 ```
-
-Replace `Town05` with any CARLA map name.
 
 ### Step 2: Set up a scenario
 
 ```bash
-python capstone_sim/Code/setup_scenario.py
+python capstone_sim/scripts/capture/setup_scenario.py
 ```
 
 This opens an interactive tool that:
 1. Lets you fly the spectator camera to your desired viewpoint in CARLA
 2. Captures the camera position when you press ENTER
 3. Lists nearby traffic lights and lets you select one
-4. Saves a `scenario_config.yaml` file with all settings
+4. Saves a config to `capstone_sim/configs/scenario_config.yaml`
 
 **Spectator controls:**
 - **WASD** - Move
 - **Mouse** - Look around
 - **Mouse Wheel** - Adjust movement speed (scroll down for slower, more precise movement)
 
+### Step 2b: Pick spawn points (optional)
+
+By default, vehicles spawn at any point within `spawn_radius` of the traffic light. To control exactly where vehicles spawn:
+
+1. Visualize all spawn points on the map:
+   ```bash
+   python capstone_sim/scripts/utils/visualize_spawns.py
+   ```
+   This draws numbered markers in the CARLA viewport for 120 seconds.
+
+2. Add the spawn point indices to your config:
+   ```yaml
+   spawn:
+     spawn_points: ["33-81"]
+   ```
+
 ### Step 3: Capture the dataset
 
 ```bash
-python capstone_sim/Code/capture_dataset.py scenario_config.yaml
+python capstone_sim/scripts/capture/capture_dataset.py capstone_sim/configs/scenario_config.yaml
 ```
 
-This runs a long simulation and outputs a YOLO-format dataset with labeled images to the configured output directory (default: `./dataset_output`).
+**Important:** Change the `scenario_name` field in the YAML before each capture run. The scenario name is used to name the output images, so reusing the same name will overwrite previous data.
 
 ---
 
 ## Configuration
 
-After running `setup_scenario.py`, edit the generated `scenario_config.yaml` to customize.
-
-**Important:** Change the `scenario_name` field in the YAML before each capture run. The scenario name is used to name the output images, so reusing the same name will overwrite previous data.
-
-
+Edit the generated YAML config in `capstone_sim/configs/` to customize:
 
 **Weather:**
 ```yaml
@@ -119,10 +153,12 @@ weather:
 ```yaml
 spawn:
   max_vehicles: 30
-  spawn_radius: 100.0       # meters from traffic light
-  respawn_interval: 50      # frames between respawn checks
-  despawn_distance: 150.0   # despawn vehicles beyond this distance
-  ratios:                   # relative spawn ratios per class
+  spawn_radius: 100.0       # meters from reference point
+  radius_center: traffic_light  # or "camera"
+  spawn_points: []           # specific indices, or ranges like ["33-81"]
+  respawn_interval: 50
+  despawn_distance: 150.0
+  ratios:
     car: 15
     ambulance: 2
     bus: 2
@@ -136,8 +172,8 @@ spawn:
 ```yaml
 simulation:
   total_frames: 5000
-  capture_interval: 10      # capture every N frames
-  warmup_frames: 100        # let traffic settle before capturing
+  capture_interval: 2       # capture every N frames (2 = 10 FPS)
+  warmup_frames: 100        # background images captured before vehicles spawn
   train_ratio: 0.8          # train/val split
 ```
 
@@ -149,7 +185,7 @@ The dataset is saved in YOLO format:
 
 ```
 dataset_output/
-├── data.yaml          # class definitions for training
+├── data.yaml
 ├── images/
 │   ├── train/
 │   └── val/
@@ -174,19 +210,8 @@ dataset_output/
 
 ## Training
 
-### 1. Install training dependencies
-
-Install PyTorch with CUDA support first, then ultralytics:
-
 ```bash
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-pip install ultralytics
-```
-
-### 2. Train the model
-
-```bash
-python capstone_sim/models/yolov11/train.py --data capstone_sim/Code/dataset_output/data.yaml
+python capstone_sim/scripts/train/train.py --data path/to/dataset_output/data.yaml
 ```
 
 **Options:**
@@ -194,31 +219,75 @@ python capstone_sim/models/yolov11/train.py --data capstone_sim/Code/dataset_out
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--data` | (required) | Path to `data.yaml` in your dataset |
-| `--model` | `yolo11n.pt` | Model size: `yolo11n.pt` (nano), `yolo11s.pt` (small), `yolo11m.pt` (medium) |
+| `--model` | `yolo11n.pt` | Model size: `yolo11n.pt`, `yolo11s.pt`, `yolo11m.pt` |
 | `--epochs` | `100` | Number of training epochs |
-| `--batch` | `16` | Batch size (reduce to 8 if running out of VRAM) |
+| `--batch` | `16` | Batch size (reduce to 8 for larger models) |
 | `--imgsz` | `640` | Input image size |
-| `--name` | auto | Name for the training run |
 | `--resume` | none | Path to checkpoint to resume training |
 
 Results are saved to `capstone_sim/models/yolov11/runs/`.
 
-### 3. Use the trained model
+---
 
-```python
-from ultralytics import YOLO
-model = YOLO('path/to/runs/train/weights/best.pt')
-results = model.predict('image.jpg')
+## Evaluation
+
+### 1. Record test footage
+
+```bash
+python capstone_sim/scripts/capture/record_test.py capstone_sim/configs/scenario_config.yaml
+```
+
+Saves sequential PNG frames and ground truth labels to `test_recordings/`. Record once, test multiple models.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--output` | `./test_recordings` | Base directory for recordings |
+| `--duration` | from config | Number of simulation frames |
+| `--fps` | `20` | Recording FPS |
+
+### 2. Evaluate a model
+
+```bash
+python capstone_sim/scripts/evaluate/evaluate_model.py test_recordings/<recording_dir> path/to/best.pt
+```
+
+Produces:
+- `annotated.mp4` — Video with bounding boxes, track IDs, and class labels
+- `metrics_summary.json` — Detection and tracking metrics (MOTA, IDF1, precision, recall)
+- `per_frame_metrics.csv` — Per-frame breakdown
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--output` | `./eval_results` | Base directory for results |
+| `--conf` | `0.25` | Confidence threshold |
+| `--iou` | `0.5` | IoU threshold |
+
+### 3. Visualize metrics
+
+```bash
+python capstone_sim/scripts/evaluate/visualize_metrics.py eval_results/<result_dir>/metrics_summary.json
+```
+
+Generates charts: per-class detection, class distribution, TP/FP/FN breakdown, tracking summary, and per-frame metrics over time.
+
+### 4. Compare models
+
+```bash
+python capstone_sim/scripts/evaluate/evaluate_model.py test_recordings/my_test model_a.pt
+python capstone_sim/scripts/evaluate/evaluate_model.py test_recordings/my_test model_b.pt
 ```
 
 ---
 
 ## Scripts Reference
 
-| Script | Purpose |
-|--------|---------|
-| `switch_map.py` | Load a CARLA map by name |
-| `setup_scenario.py` | Interactive tool to position camera and select traffic light |
-| `visualize_spawns.py` | Draw numbered spawn point markers in the CARLA viewport |
-| `capture_dataset.py` | Run simulation and capture YOLO-format dataset |
-| `train.py` | Train YOLOv11 on captured dataset |
+| Script | Location | Purpose |
+|--------|----------|---------|
+| `switch_map.py` | `scripts/utils/` | Load a CARLA map by name |
+| `visualize_spawns.py` | `scripts/utils/` | Draw numbered spawn point markers in CARLA |
+| `setup_scenario.py` | `scripts/capture/` | Position camera and select traffic light |
+| `capture_dataset.py` | `scripts/capture/` | Capture YOLO-format dataset |
+| `record_test.py` | `scripts/capture/` | Record test footage with ground truth |
+| `train.py` | `scripts/train/` | Train YOLOv11 model |
+| `evaluate_model.py` | `scripts/evaluate/` | Run detection + tracking evaluation |
+| `visualize_metrics.py` | `scripts/evaluate/` | Generate metric charts |

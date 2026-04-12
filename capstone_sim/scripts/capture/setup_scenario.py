@@ -149,9 +149,10 @@ def main():
         }
     }
 
-    # Save config next to this script
-    script_dir = Path(__file__).resolve().parent
-    output_path = script_dir / 'scenario_config.yaml'
+    # Save config to configs directory
+    configs_dir = Path(__file__).resolve().parents[3] / 'capstone_sim' / 'configs'
+    configs_dir.mkdir(parents=True, exist_ok=True)
+    output_path = configs_dir / 'scenario_config.yaml'
     with open(output_path, 'w') as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
 
