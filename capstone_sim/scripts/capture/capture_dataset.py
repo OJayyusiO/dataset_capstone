@@ -97,8 +97,14 @@ def run_capture(config_path):
         config = yaml.safe_load(f)
 
     # Extract config sections
-    camera_config = config['camera']
+    # Support both 'cameras' (list) and legacy 'camera' (single dict)
+    if 'cameras' in config:
+        camera_configs = config['cameras']
+    else:
+        camera_configs = [config['camera']]
+
     weather_config = config.get('weather', {})
+    weather_cycle = config.get('weather_cycle')
     sim_config = config.get('simulation', {})
     spawn_config = config.get('spawn', {})
     output_config = config.get('output', {})
@@ -117,38 +123,56 @@ def run_capture(config_path):
         'police_car': 2, 'fire_truck': 1, 'bike': 4
     })
 
-    image_w = camera_config.get('image_width', 1280)
-    image_h = camera_config.get('image_height', 720)
-    fov = camera_config.get('fov', 70)
-
+    num_cameras = len(camera_configs)
     output_dir = Path(output_config.get('directory', './dataset_output'))
     dirs = setup_output_dirs(output_dir)
-    K = build_projection_matrix(image_w, image_h, fov)
+
+    # Build projection matrix per camera
+    cam_params = []
+    for cc in camera_configs:
+        w = cc.get('image_width', 1280)
+        h = cc.get('image_height', 720)
+        f = cc.get('fov', 70)
+        cam_params.append({'w': w, 'h': h, 'fov': f, 'K': build_projection_matrix(w, h, f)})
 
     target_counts = compute_target_counts(ratios, max_vehicles)
 
     # Print summary
-    expected_captures = max(0, (total_frames - warmup_frames)) // capture_interval
+    expected_captures = max(0, (total_frames - warmup_frames)) // capture_interval * num_cameras
     print("=" * 60)
     print("CARLA Dataset Capture")
     print("=" * 60)
     print(f"Scenario: {config.get('scenario_name', 'unnamed')}")
     print(f"Output: {output_dir.resolve()}")
+    print(f"Cameras: {num_cameras}")
     print(f"Frames: {total_frames} total, {warmup_frames} warmup")
     print(f"Capture every {capture_interval} frames -> ~{expected_captures} images")
     print(f"Train/Val split: {train_ratio:.0%}/{1-train_ratio:.0%}")
     print(f"Max vehicles: {max_vehicles}, spawn radius: {spawn_config.get('spawn_radius', 100.0)}m")
     print(f"Spawn ratios: {ratios}")
     print(f"Target counts: {{{', '.join(f'{CLASS_NAMES[k]}: {v}' for k, v in target_counts.items())}}}")
-    print(f"Weather: sun={weather_config.get('sun_altitude_angle', 45)}, "
-          f"cloud={weather_config.get('cloudiness', 10)}, "
-          f"rain={weather_config.get('precipitation', 0)}, "
-          f"fog={weather_config.get('fog_density', 0)}")
+    if weather_cycle:
+        print(f"Weather: cycling through {len(weather_cycle)} presets")
+    else:
+        print(f"Weather: sun={weather_config.get('sun_altitude_angle', 45)}, "
+              f"cloud={weather_config.get('cloudiness', 10)}, "
+              f"rain={weather_config.get('precipitation', 0)}, "
+              f"fog={weather_config.get('fog_density', 0)}")
     print("=" * 60)
 
     # Connect to CARLA
     client = carla.Client('localhost', 2000)
     client.set_timeout(10.0)
+
+    # Switch map if specified in config
+    target_map = config.get('map')
+    if target_map:
+        current_map = client.get_world().get_map().name.split('/')[-1]
+        if current_map != target_map:
+            print(f"Loading map {target_map}...")
+            client.load_world(target_map)
+            time.sleep(5)  # Wait for map to load
+
     world = client.get_world()
 
     bp_lib = world.get_blueprint_library()
@@ -179,22 +203,41 @@ def run_capture(config_path):
     if missing_classes:
         print(f"WARNING: No blueprints found for: {missing_classes}")
 
-    image_queue = queue.Queue()
     current_vehicles = []  # list of (actor, class_id)
     actor_list = []
 
     try:
-        # Apply weather
-        apply_weather(world, weather_config)
-        print("Weather applied")
+        # Apply initial weather
+        if weather_cycle:
+            weather_presets = weather_cycle
+            # Calculate frames per weather preset (excluding warmup)
+            capture_frames = total_frames - warmup_frames
+            frames_per_weather = max(1, capture_frames // len(weather_presets))
+            apply_weather(world, weather_presets[0])
+            print(f"Weather preset 1/{len(weather_presets)} applied (switching every {frames_per_weather} frames)")
+        else:
+            weather_presets = None
+            frames_per_weather = 0
+            apply_weather(world, weather_config)
+            print("Weather applied")
 
-        # Spawn camera
-        camera = spawn_camera(world, bp_lib, camera_config)
-        actor_list.append(camera)
-        camera.listen(image_queue.put)
-        world.tick()  # Tick so CARLA updates the camera transform
-        camera_location = camera.get_transform().location
-        print(f"Camera spawned at ({camera_location.x:.1f}, {camera_location.y:.1f}, {camera_location.z:.1f})")
+        # Spawn cameras
+        cameras = []
+        image_queues = []
+        camera_locations = []
+        for cam_idx, cc in enumerate(camera_configs):
+            q = queue.Queue()
+            cam = spawn_camera(world, bp_lib, cc)
+            actor_list.append(cam)
+            cam.listen(q.put)
+            cameras.append(cam)
+            image_queues.append(q)
+
+        world.tick()  # Tick so CARLA updates camera transforms
+        for cam_idx, cam in enumerate(cameras):
+            loc = cam.get_transform().location
+            camera_locations.append(loc)
+            print(f"Camera {cam_idx} spawned at ({loc.x:.1f}, {loc.y:.1f}, {loc.z:.1f})")
 
         # Find traffic light and filter spawn points nearby
         spawn_radius = spawn_config.get('spawn_radius', 100.0)
@@ -212,9 +255,9 @@ def run_capture(config_path):
         # Reference location for spawn radius filtering and despawning
         radius_center = spawn_config.get('radius_center', 'traffic_light')
         if radius_center == 'camera':
-            reference_location = camera_location
+            reference_location = camera_locations[0]
         else:
-            reference_location = light_location if light_location else camera_location
+            reference_location = light_location if light_location else camera_locations[0]
 
         # Filter spawn points: use explicit list if provided, otherwise radius-based
         raw_spawn_points = spawn_config.get('spawn_points')
@@ -260,25 +303,31 @@ def run_capture(config_path):
         for frame in range(total_frames):
             world.tick()
 
-            # Drain image queue (keep only latest)
-            latest_image = None
-            try:
-                while True:
-                    latest_image = image_queue.get_nowait()
-            except queue.Empty:
-                pass
+            # Drain all image queues (keep only latest per camera)
+            latest_images = [None] * num_cameras
+            for ci, q in enumerate(image_queues):
+                try:
+                    while True:
+                        latest_images[ci] = q.get_nowait()
+                except queue.Empty:
+                    pass
 
             # Capture background images during warmup (no vehicles present)
             if frame < warmup_frames:
-                if (frame % capture_interval == 0) and latest_image is not None:
-                    img_data = np.array(latest_image.raw_data)
-                    img = img_data.reshape((image_h, image_w, 4))[:, :, :3].copy()
-                    split = 'train' if random.random() < train_ratio else 'val'
-                    scene_name = config.get('scenario_name', 'scene')
-                    frame_id = f"{scene_name}_{frame_counter:06d}"
-                    save_frame(img, [], frame_id, split, dirs)
-                    frame_counter += 1
-                    captured_count += 1
+                if (frame % capture_interval == 0):
+                    for ci, raw_img in enumerate(latest_images):
+                        if raw_img is None:
+                            continue
+                        p = cam_params[ci]
+                        img_data = np.array(raw_img.raw_data)
+                        img = img_data.reshape((p['h'], p['w'], 4))[:, :, :3].copy()
+                        split = 'train' if random.random() < train_ratio else 'val'
+                        scene_name = config.get('scenario_name', 'scene')
+                        cam_label = f"cam{ci}" if num_cameras > 1 else ""
+                        frame_id = f"{scene_name}_{cam_label}_{frame_counter:06d}" if cam_label else f"{scene_name}_{frame_counter:06d}"
+                        save_frame(img, [], frame_id, split, dirs)
+                        frame_counter += 1
+                        captured_count += 1
                 if frame == warmup_frames - 1:
                     print(f"Warmup complete ({warmup_frames} frames, {captured_count} background images captured)")
                 continue
@@ -301,7 +350,6 @@ def run_capture(config_path):
                                                despawn_distance)
                 spawned = spawn_to_fill(world, bp_lib, tm_port, class_bps,
                                         target_counts, current_vehicles, spawn_points)
-                # Configure new vehicles
                 for v, cls_id in current_vehicles:
                     try:
                         if cls_id == 6:
@@ -309,50 +357,58 @@ def run_capture(config_path):
                         else:
                             traffic_manager.vehicle_percentage_speed_difference(v, 30.0)
                     except RuntimeError:
-                        pass  # vehicle may have been destroyed between check and configure
+                        pass
+
+            # Weather cycling
+            if weather_presets and frames_per_weather > 0:
+                frames_since_warmup = frame - warmup_frames
+                preset_idx = min(frames_since_warmup // frames_per_weather, len(weather_presets) - 1)
+                if frames_since_warmup > 0 and frames_since_warmup % frames_per_weather == 0 and preset_idx < len(weather_presets):
+                    apply_weather(world, weather_presets[preset_idx])
+                    print(f"  Weather preset {preset_idx + 1}/{len(weather_presets)} applied")
 
             # Capture at interval
             if (frame - warmup_frames) % capture_interval != 0:
                 continue
 
-            if latest_image is None:
-                continue
-
-            # Convert image
-            img_data = np.array(latest_image.raw_data)
-            img = img_data.reshape((image_h, image_w, 4))[:, :, :3].copy()
-
-            # Compute YOLO labels
-            labels = []
-            for vehicle, class_id in current_vehicles:
-                if not vehicle.is_alive:
+            # Process each camera
+            for ci, raw_img in enumerate(latest_images):
+                if raw_img is None:
                     continue
-                dist = vehicle.get_transform().location.distance(camera_location)
-                if dist > MAX_DISTANCE:
-                    continue
-                bbox = get_2d_bbox(vehicle, camera, K, image_w, image_h)
-                if bbox is None:
-                    continue
-                yolo_label = bbox_to_yolo(bbox, class_id, image_w, image_h)
-                labels.append(yolo_label)
 
-            # Skip frames with no detections (background images are captured during warmup)
-            if len(labels) == 0:
-                if frame % 100 == 0:
-                    alive_count = sum(1 for v, _ in current_vehicles if v.is_alive)
-                    print(f"  Frame {frame}: no vehicles in view (alive: {alive_count})")
-                continue
+                p = cam_params[ci]
+                img_data = np.array(raw_img.raw_data)
+                img = img_data.reshape((p['h'], p['w'], 4))[:, :, :3].copy()
 
-            # Train/val split
-            split = 'train' if random.random() < train_ratio else 'val'
-            scene_name = config.get('scenario_name', 'scene')
-            frame_id = f"{scene_name}_{frame_counter:06d}"
-            save_frame(img, labels, frame_id, split, dirs)
-            frame_counter += 1
-            captured_count += 1
+                # Compute YOLO labels for this camera
+                labels = []
+                for vehicle, class_id in current_vehicles:
+                    if not vehicle.is_alive:
+                        continue
+                    dist = vehicle.get_transform().location.distance(camera_locations[ci])
+                    if dist > MAX_DISTANCE:
+                        continue
+                    bbox = get_2d_bbox(vehicle, cameras[ci], p['K'], p['w'], p['h'])
+                    if bbox is None:
+                        continue
+                    yolo_label = bbox_to_yolo(bbox, class_id, p['w'], p['h'])
+                    labels.append(yolo_label)
+
+                # Skip frames with no detections (background images are captured during warmup)
+                if len(labels) == 0:
+                    continue
+
+                # Train/val split
+                split = 'train' if random.random() < train_ratio else 'val'
+                scene_name = config.get('scenario_name', 'scene')
+                cam_label = f"cam{ci}" if num_cameras > 1 else ""
+                frame_id = f"{scene_name}_{cam_label}_{frame_counter:06d}" if cam_label else f"{scene_name}_{frame_counter:06d}"
+                save_frame(img, labels, frame_id, split, dirs)
+                frame_counter += 1
+                captured_count += 1
 
             # Progress update every 50 captures
-            if captured_count % 50 == 0:
+            if captured_count > 0 and captured_count % 50 == 0:
                 elapsed = time.time() - start_time
                 fps = frame / max(elapsed, 0.001)
                 alive_count = sum(1 for v, _ in current_vehicles if v.is_alive)
@@ -363,12 +419,16 @@ def run_capture(config_path):
 
         print(f"\nSimulation complete ({total_frames} frames)")
 
+        interrupted = False
+
     except KeyboardInterrupt:
+        interrupted = True
         print("\n\nStopped by user")
 
     finally:
-        # Cleanup
-        camera.stop()
+        # Cleanup CARLA
+        for cam in cameras:
+            cam.stop()
         for actor in actor_list:
             if actor.is_alive:
                 actor.destroy()
@@ -380,34 +440,36 @@ def run_capture(config_path):
         world.apply_settings(original_settings)
         traffic_manager.set_synchronous_mode(False)
 
-    # Write data.yaml
-    write_data_yaml(output_dir)
+    if interrupted:
+        # Delete frames captured during this run
+        print(f"Cleaning up {captured_count} frames from interrupted capture...")
+        for split in ['train', 'val']:
+            for subdir in ['images', 'labels']:
+                d = dirs.get(f'{subdir}_{split}')
+                if d and d.exists():
+                    scene_name = config.get('scenario_name', 'scene')
+                    for f in d.glob(f'{scene_name}_*'):
+                        f.unlink()
+        print("Cleanup complete. No data saved from this run.")
+    else:
+        # Write data.yaml
+        write_data_yaml(output_dir)
 
-    elapsed = time.time() - start_time
-    print("\n" + "=" * 60)
-    print(f"Dataset capture complete!")
-    print(f"Total captured frames: {captured_count}")
-    print(f"Time elapsed: {elapsed/60:.1f} minutes")
-    print(f"Output: {output_dir.resolve()}")
-    print("=" * 60)
+        elapsed = time.time() - start_time
+        print("\n" + "=" * 60)
+        print(f"Dataset capture complete!")
+        print(f"Total captured frames: {captured_count}")
+        print(f"Time elapsed: {elapsed/60:.1f} minutes")
+        print(f"Output: {output_dir.resolve()}")
+        print("=" * 60)
 
-    # Print label distribution
-    print("\nLabel distribution:")
-    for split in ['train', 'val']:
-        label_dir = output_dir / 'labels' / split
-        counts = {i: 0 for i in CLASS_NAMES}
-        total_labels = 0
-        for label_file in label_dir.glob('*.txt'):
-            with open(label_file) as f:
-                for line in f:
-                    parts = line.strip().split()
-                    if parts:
-                        cls = int(parts[0])
-                        counts[cls] = counts.get(cls, 0) + 1
-                        total_labels += 1
-        print(f"  {split}: {total_labels} annotations")
-        for cls_id, name in CLASS_NAMES.items():
-            print(f"    {name}: {counts.get(cls_id, 0)}")
+        # Auto-validate dataset
+        try:
+            from capstone_sim.scripts.evaluate.analyze_dataset import analyze
+            print()
+            analyze(str(output_dir))
+        except ImportError:
+            pass
 
 
 def main():

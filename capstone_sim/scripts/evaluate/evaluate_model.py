@@ -294,6 +294,39 @@ def compute_detection_metrics(gt, predictions, iou_threshold):
     }
 
 
+def compute_confusion_matrix(gt, predictions, iou_threshold, num_classes=7):
+    """Compute a confusion matrix for detection results.
+
+    Returns a (num_classes+1) x (num_classes+1) matrix (list of lists).
+    Rows = ground truth class, columns = predicted class.
+    Index num_classes (7) represents 'background' (missed GT / false positive).
+    """
+    size = num_classes + 1
+    matrix = [[0] * size for _ in range(size)]
+    bg = num_classes  # background index
+
+    for frame_idx in gt:
+        gt_dets = gt[frame_idx]
+        pred_dets = predictions.get(frame_idx, [])
+
+        matches, unmatched_gt, unmatched_pred = match_detections(gt_dets, pred_dets, iou_threshold)
+
+        for gi, pi in matches:
+            gt_cls = gt_dets[gi]['class_id']
+            pred_cls = pred_dets[pi]['class_id']
+            matrix[gt_cls][pred_cls] += 1
+
+        for gi in unmatched_gt:
+            gt_cls = gt_dets[gi]['class_id']
+            matrix[gt_cls][bg] += 1
+
+        for pi in unmatched_pred:
+            pred_cls = pred_dets[pi]['class_id']
+            matrix[bg][pred_cls] += 1
+
+    return matrix
+
+
 def compute_tracking_metrics(gt, predictions, iou_threshold):
     """Compute MOTA and IDF1 tracking metrics."""
     total_gt = 0
@@ -420,7 +453,7 @@ def compute_per_frame_metrics(gt, predictions, iou_threshold):
     return rows
 
 
-def evaluate(recording_dir, model_path, output_base, conf, iou, video_fps):
+def evaluate(recording_dir, model_path, output_base, conf, iou, video_fps, visualize=False):
     recording_dir = Path(recording_dir)
     frames_dir = recording_dir / 'frames'
     gt_dir = recording_dir / 'ground_truth'
@@ -475,6 +508,7 @@ def evaluate(recording_dir, model_path, output_base, conf, iou, video_fps):
     print("\nComputing metrics...")
     det_metrics = compute_detection_metrics(gt, predictions, iou)
     track_metrics = compute_tracking_metrics(gt, predictions, iou)
+    confusion_mat = compute_confusion_matrix(gt, predictions, iou)
 
     print(f"\n  Detection:  Precision={det_metrics['precision']:.3f}  Recall={det_metrics['recall']:.3f}")
     print(f"  Tracking:   MOTA={track_metrics['MOTA']:.3f}  IDF1={track_metrics['IDF1']:.3f}  "
@@ -511,6 +545,7 @@ def evaluate(recording_dir, model_path, output_base, conf, iou, video_fps):
         'num_frames': num_frames,
         'detection': det_metrics,
         'tracking': track_metrics,
+        'confusion_matrix': confusion_mat,
         'gpu_performance': gpu_metrics,
     }
 
@@ -530,6 +565,35 @@ def evaluate(recording_dir, model_path, output_base, conf, iou, video_fps):
                            result_dir / 'annotated.mp4',
                            image_w, image_h, fps, class_names)
 
+    # Generate charts if requested
+    if visualize:
+        try:
+            from capstone_sim.scripts.evaluate.visualize_metrics import (
+                plot_per_class_detection, plot_class_distribution,
+                plot_tp_fp_fn, plot_tracking_summary, plot_per_frame,
+                plot_confusion_matrix,
+            )
+            print("\nGenerating metric charts...")
+            plot_per_class_detection(det_metrics, result_dir)
+            plot_class_distribution(det_metrics, result_dir)
+            plot_tp_fp_fn(det_metrics, result_dir)
+            plot_tracking_summary(track_metrics, det_metrics, result_dir)
+            plot_per_frame(result_dir / 'per_frame_metrics.csv', result_dir)
+            if 'confusion_matrix' in summary:
+                plot_confusion_matrix(summary['confusion_matrix'], result_dir)
+        except ImportError:
+            print("\nSkipping charts (matplotlib not installed)")
+
+    # Generate HTML report
+    if visualize:
+        try:
+            from capstone_sim.scripts.evaluate.generate_report import generate_html
+            report_path = result_dir / 'report.html'
+            print("\nGenerating HTML report...")
+            generate_html(None, [str(result_dir)], str(report_path))
+        except ImportError:
+            pass
+
     print(f"\nResults saved to: {result_dir.resolve()}")
     return summary
 
@@ -546,6 +610,8 @@ def main():
                         help='IoU threshold (default: 0.5)')
     parser.add_argument('--video-fps', type=int, default=None,
                         help='FPS for annotated video (default: from recording)')
+    parser.add_argument('--no-visualize', action='store_true',
+                        help='Skip generating metric charts')
     args = parser.parse_args()
 
     recording_path = Path(args.recording)
@@ -558,7 +624,7 @@ def main():
         print(f"Model not found: {model_path}")
         sys.exit(1)
 
-    evaluate(str(recording_path), str(model_path), args.output, args.conf, args.iou, args.video_fps)
+    evaluate(str(recording_path), str(model_path), args.output, args.conf, args.iou, args.video_fps, not args.no_visualize)
 
 
 if __name__ == '__main__':

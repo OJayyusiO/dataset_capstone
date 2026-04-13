@@ -63,14 +63,16 @@ def run_recording(config_path, output_base, duration, fps):
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
 
-    camera_config = config['camera']
+    # Support both 'cameras' (list) and legacy 'camera' (single dict)
+    if 'cameras' in config:
+        camera_configs = config['cameras']
+    else:
+        camera_configs = [config['camera']]
+
     weather_config = config.get('weather', {})
     spawn_config = config.get('spawn', {})
 
-    image_w = camera_config.get('image_width', 1280)
-    image_h = camera_config.get('image_height', 720)
-    fov = camera_config.get('fov', 70)
-
+    num_cameras = len(camera_configs)
     fixed_delta = 1.0 / fps
     total_frames = duration
     warmup_frames = config.get('simulation', {}).get('warmup_frames', 100)
@@ -84,7 +86,13 @@ def run_recording(config_path, output_base, duration, fps):
     })
 
     target_counts = compute_target_counts(ratios, max_vehicles)
-    K = build_projection_matrix(image_w, image_h, fov)
+
+    cam_params = []
+    for cc in camera_configs:
+        w = cc.get('image_width', 1280)
+        h = cc.get('image_height', 720)
+        f = cc.get('fov', 70)
+        cam_params.append({'w': w, 'h': h, 'fov': f, 'K': build_projection_matrix(w, h, f)})
 
     # Create output directory
     scenario_name = config.get('scenario_name', 'test')
@@ -100,6 +108,7 @@ def run_recording(config_path, output_base, duration, fps):
     print("=" * 60)
     print(f"Scenario: {scenario_name}")
     print(f"Output: {recording_dir.resolve()}")
+    print(f"Cameras: {num_cameras}")
     print(f"Frames: {total_frames} ({warmup_frames} warmup)")
     print(f"FPS: {fps} (fixed_delta={fixed_delta:.4f})")
     print(f"Max vehicles: {max_vehicles}")
@@ -112,6 +121,16 @@ def run_recording(config_path, output_base, duration, fps):
     # Connect to CARLA
     client = carla.Client('localhost', 2000)
     client.set_timeout(10.0)
+
+    # Switch map if specified in config
+    target_map = config.get('map')
+    if target_map:
+        current_map = client.get_world().get_map().name.split('/')[-1]
+        if current_map != target_map:
+            print(f"Loading map {target_map}...")
+            client.load_world(target_map)
+            time.sleep(5)  # Wait for map to load
+
     world = client.get_world()
 
     bp_lib = world.get_blueprint_library()
@@ -137,7 +156,6 @@ def run_recording(config_path, output_base, duration, fps):
     available_bps = get_available_blueprints(bp_lib)
     class_bps = build_class_blueprint_map(available_bps)
 
-    image_queue = queue.Queue()
     current_vehicles = []
     actor_list = []
 
@@ -145,12 +163,23 @@ def run_recording(config_path, output_base, duration, fps):
         apply_weather(world, weather_config)
         print("Weather applied")
 
-        camera = spawn_camera(world, bp_lib, camera_config)
-        actor_list.append(camera)
-        camera.listen(image_queue.put)
+        # Spawn cameras
+        cameras = []
+        image_queues = []
+        camera_locations = []
+        for ci, cc in enumerate(camera_configs):
+            q = queue.Queue()
+            cam = spawn_camera(world, bp_lib, cc)
+            actor_list.append(cam)
+            cam.listen(q.put)
+            cameras.append(cam)
+            image_queues.append(q)
+
         world.tick()
-        camera_location = camera.get_transform().location
-        print(f"Camera at ({camera_location.x:.1f}, {camera_location.y:.1f}, {camera_location.z:.1f})")
+        for ci, cam in enumerate(cameras):
+            loc = cam.get_transform().location
+            camera_locations.append(loc)
+            print(f"Camera {ci} at ({loc.x:.1f}, {loc.y:.1f}, {loc.z:.1f})")
 
         # Find traffic light and set reference location
         spawn_radius = spawn_config.get('spawn_radius', 100.0)
@@ -165,9 +194,9 @@ def run_recording(config_path, output_base, duration, fps):
 
         radius_center = spawn_config.get('radius_center', 'traffic_light')
         if radius_center == 'camera':
-            reference_location = camera_location
+            reference_location = camera_locations[0]
         else:
-            reference_location = light_location if light_location else camera_location
+            reference_location = light_location if light_location else camera_locations[0]
 
         # Filter spawn points
         raw_spawn_points = spawn_config.get('spawn_points')
@@ -205,21 +234,27 @@ def run_recording(config_path, output_base, duration, fps):
         for frame in range(total_frames):
             world.tick()
 
-            latest_image = None
-            try:
-                while True:
-                    latest_image = image_queue.get_nowait()
-            except queue.Empty:
-                pass
+            # Drain all image queues
+            latest_images = [None] * num_cameras
+            for ci, q in enumerate(image_queues):
+                try:
+                    while True:
+                        latest_images[ci] = q.get_nowait()
+                except queue.Empty:
+                    pass
 
             # Warmup: record frames but don't spawn vehicles yet
             if frame < warmup_frames:
-                if latest_image is not None:
-                    img_data = np.array(latest_image.raw_data)
-                    img = img_data.reshape((image_h, image_w, 4))[:, :, :3].copy()
-                    cv2.imwrite(str(frames_dir / f"{frame_counter:06d}.png"), img)
-                    with open(gt_dir / f"{frame_counter:06d}.txt", 'w') as f:
-                        pass  # Empty label file — no vehicles yet
+                for ci, raw_img in enumerate(latest_images):
+                    if raw_img is None:
+                        continue
+                    p = cam_params[ci]
+                    img_data = np.array(raw_img.raw_data)
+                    img = img_data.reshape((p['h'], p['w'], 4))[:, :, :3].copy()
+                    prefix = f"cam{ci}_" if num_cameras > 1 else ""
+                    cv2.imwrite(str(frames_dir / f"{prefix}{frame_counter:06d}.png"), img)
+                    with open(gt_dir / f"{prefix}{frame_counter:06d}.txt", 'w') as f:
+                        pass
                     frame_counter += 1
                 if frame == warmup_frames - 1:
                     print(f"Warmup complete ({warmup_frames} frames)")
@@ -251,30 +286,32 @@ def run_recording(config_path, output_base, duration, fps):
                     except RuntimeError:
                         pass
 
-            if latest_image is None:
-                continue
+            # Save frames and ground truth for each camera
+            for ci, raw_img in enumerate(latest_images):
+                if raw_img is None:
+                    continue
 
-            # Save frame
-            img_data = np.array(latest_image.raw_data)
-            img = img_data.reshape((image_h, image_w, 4))[:, :, :3].copy()
-            cv2.imwrite(str(frames_dir / f"{frame_counter:06d}.png"), img)
+                p = cam_params[ci]
+                img_data = np.array(raw_img.raw_data)
+                img = img_data.reshape((p['h'], p['w'], 4))[:, :, :3].copy()
+                prefix = f"cam{ci}_" if num_cameras > 1 else ""
+                cv2.imwrite(str(frames_dir / f"{prefix}{frame_counter:06d}.png"), img)
 
-            # Save ground truth
-            labels = get_gt_labels(current_vehicles, camera, K, image_w, image_h, camera_location)
-            with open(gt_dir / f"{frame_counter:06d}.txt", 'w') as f:
-                for label in labels:
-                    f.write(label + '\n')
+                labels = get_gt_labels(current_vehicles, cameras[ci], p['K'],
+                                       p['w'], p['h'], camera_locations[ci])
+                with open(gt_dir / f"{prefix}{frame_counter:06d}.txt", 'w') as f:
+                    for label in labels:
+                        f.write(label + '\n')
 
-            frame_counter += 1
+                frame_counter += 1
 
             # Progress
-            if frame_counter % 200 == 0:
+            if frame_counter > 0 and frame_counter % 200 == 0:
                 elapsed = time.time() - start_time
                 sim_fps = frame / max(elapsed, 0.001)
                 alive = sum(1 for v, _ in current_vehicles if v.is_alive)
-                print(f"  Frame {frame_counter}/{total_frames} | "
+                print(f"  Frame {frame_counter}/{total_frames * num_cameras} | "
                       f"Vehicles: {alive} | "
-                      f"GT objects: {len(labels)} | "
                       f"{sim_fps:.1f} sim fps")
 
         print(f"\nRecording complete ({frame_counter} frames saved)")
@@ -289,9 +326,10 @@ def run_recording(config_path, output_base, duration, fps):
             'scenario_name': scenario_name,
             'recording_date': datetime.now().isoformat(),
             'num_frames': frame_counter,
-            'image_width': image_w,
-            'image_height': image_h,
-            'fov': fov,
+            'num_cameras': num_cameras,
+            'image_width': cam_params[0]['w'],
+            'image_height': cam_params[0]['h'],
+            'fov': cam_params[0]['fov'],
             'fps': fps,
             'fixed_delta_seconds': fixed_delta,
             'class_names': CLASS_NAMES,
@@ -299,7 +337,8 @@ def run_recording(config_path, output_base, duration, fps):
         with open(recording_dir / 'recording_meta.yaml', 'w') as f:
             yaml.dump(meta, f, default_flow_style=False, sort_keys=False)
 
-        camera.stop()
+        for cam in cameras:
+            cam.stop()
         for actor in actor_list:
             if actor.is_alive:
                 actor.destroy()

@@ -169,6 +169,36 @@ def plot_tracking_summary(track_metrics, det_metrics, output_dir):
     print(f"  Saved evaluation_summary.png")
 
 
+def plot_confusion_matrix(confusion_matrix, output_dir):
+    """Heatmap of the confusion matrix."""
+    labels = ['car', 'ambulance', 'bus', 'truck', 'police_car', 'fire_truck', 'bike', 'background']
+    matrix = np.array(confusion_matrix)
+
+    fig, ax = plt.subplots(figsize=(10, 8))
+    im = ax.imshow(matrix, cmap='Blues')
+
+    ax.set_xticks(np.arange(len(labels)))
+    ax.set_yticks(np.arange(len(labels)))
+    ax.set_xticklabels(labels, rotation=45, ha='right')
+    ax.set_yticklabels(labels)
+    ax.set_xlabel('Predicted')
+    ax.set_ylabel('Ground Truth')
+    ax.set_title('Confusion Matrix')
+
+    # Annotate each cell with the count
+    for i in range(len(labels)):
+        for j in range(len(labels)):
+            val = matrix[i, j]
+            color = 'white' if val > matrix.max() / 2 else 'black'
+            ax.text(j, i, str(val), ha='center', va='center', color=color)
+
+    fig.colorbar(im)
+    plt.tight_layout()
+    plt.savefig(output_dir / 'confusion_matrix.png', dpi=150)
+    plt.close()
+    print(f"  Saved confusion_matrix.png")
+
+
 def plot_per_frame(csv_path, output_dir):
     """Line plots of per-frame metrics over time."""
     frames, num_gt, num_pred, tp, fp, fn, switches = [], [], [], [], [], [], []
@@ -280,6 +310,9 @@ def main():
     plot_class_distribution(data['detection'], output_dir)
     plot_tp_fp_fn(data['detection'], output_dir)
     plot_tracking_summary(data['tracking'], data['detection'], output_dir)
+
+    if 'confusion_matrix' in data:
+        plot_confusion_matrix(data['confusion_matrix'], output_dir)
 
     if per_frame_path and per_frame_path.exists():
         plot_per_frame(per_frame_path, output_dir)
