@@ -30,7 +30,15 @@ def main():
                         help='Name for this training run (default: auto-generated)')
     parser.add_argument('--resume', type=str, default=None,
                         help='Path to checkpoint to resume training from')
+    parser.add_argument('--cache', type=str, default='false',
+                        choices=['true', 'false', 'disk'],
+                        help='Cache mode: true (RAM, fastest, needs lots of RAM), '
+                             'disk (decoded files on disk, medium speed), '
+                             'false (no cache, default)')
     args = parser.parse_args()
+
+    # Convert cache string to proper value
+    cache_value = {'true': True, 'false': False, 'disk': 'disk'}[args.cache]
 
     data_path = Path(args.data).resolve()
     if not data_path.exists():
@@ -69,6 +77,7 @@ def main():
             save_period=10,
             device=0,
             workers=4,
+            cache=cache_value,
             exist_ok=True,
         )
 

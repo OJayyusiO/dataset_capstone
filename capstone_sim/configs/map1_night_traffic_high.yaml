@@ -30,6 +30,7 @@ spawn:
   spawn_radius: 70.0
   respawn_interval: 20
   despawn_distance: 90
+  force_respawn_interval: 200
   ratios:
     car: 13
     ambulance: 3

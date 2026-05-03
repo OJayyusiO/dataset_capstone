@@ -32,6 +32,7 @@ spawn:
   spawn_points: ["33-81"]
   respawn_interval: 50
   despawn_distance: 100.0
+  force_respawn_interval: 200
   ratios:
     car: 15
     ambulance: 2

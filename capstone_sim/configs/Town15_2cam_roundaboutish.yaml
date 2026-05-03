@@ -1,0 +1,148 @@
+scenario_name: Town15_2cam_roundaboutish
+map: Town15
+cameras:
+- location:
+    x: -160.91
+    y: 159.18
+    z: 159.82
+  rotation:
+    pitch: -21.68
+    yaw: -154.44
+    roll: 0.0
+  image_width: 1280
+  image_height: 720
+  fov: 70
+- location:
+    x: -206.93
+    y: 137.84
+    z: 162.12
+  rotation:
+    pitch: -31.58
+    yaw: 50.75
+    roll: 0.0
+  image_width: 1280
+  image_height: 720
+  fov: 70
+traffic_light:
+  id: 862
+  red_time: 3.0
+  green_time: 15.0
+  yellow_time: 2.0
+weather:
+  cloudiness: 40.0
+  precipitation: 0.0
+  sun_altitude_angle: 25.0
+  fog_density: 0.0
+  wetness: 0.0
+weather_cycle:
+- sun_altitude_angle: 70
+  cloudiness: 5
+  precipitation: 0
+  fog_density: 0
+  wetness: 0
+- sun_altitude_angle: 45
+  cloudiness: 40
+  precipitation: 0
+  fog_density: 0
+  wetness: 0
+- sun_altitude_angle: 80
+  cloudiness: 90
+  precipitation: 0
+  fog_density: 0
+  wetness: 0
+- sun_altitude_angle: 8
+  cloudiness: 20
+  precipitation: 0
+  fog_density: 0
+  wetness: 0
+- sun_altitude_angle: 3
+  cloudiness: 50
+  precipitation: 0
+  fog_density: 0
+  wetness: 0
+- sun_altitude_angle: -30
+  cloudiness: 10
+  precipitation: 0
+  fog_density: 0
+  wetness: 0
+- sun_altitude_angle: -60
+  cloudiness: 30
+  precipitation: 0
+  fog_density: 0
+  wetness: 0
+- sun_altitude_angle: 35
+  cloudiness: 70
+  precipitation: 30
+  fog_density: 5
+  wetness: 30
+- sun_altitude_angle: 25
+  cloudiness: 90
+  precipitation: 80
+  fog_density: 15
+  wetness: 70
+- sun_altitude_angle: -15
+  cloudiness: 60
+  precipitation: 40
+  fog_density: 10
+  wetness: 50
+- sun_altitude_angle: 20
+  cloudiness: 60
+  precipitation: 0
+  fog_density: 40
+  wetness: 20
+- sun_altitude_angle: 10
+  cloudiness: 80
+  precipitation: 0
+  fog_density: 70
+  wetness: 10
+- sun_altitude_angle: 50
+  cloudiness: 30
+  precipitation: 0
+  fog_density: 0
+  wetness: 60
+simulation:
+  total_frames: 7000
+  capture_interval: 10
+  warmup_frames: 60
+  train_ratio: 0.8
+  fixed_delta_seconds: 0.05
+spawn:
+  max_vehicles: 25
+  spawn_radius: 80.0
+  radius_center: camera
+  spawn_points: []
+  respawn_interval: 40
+  despawn_distance: 100.0
+  force_respawn_interval: 200
+  custom_spawn_points:
+    - {x: -147.89, y: 166.22, z: 152.0, yaw: 50.55}
+    - {x: -163.84, y: 158.62, z: 152.39, yaw: 9.27}
+    - {x: -153.99, y: 157.34, z: 152.0, yaw: -343.28}
+    - {x: -179.13, y: 153.36, z: 153.52, yaw: 6.98}
+    - {x: -179.58, y: 156.33, z: 153.52, yaw: 6.97}
+    - {x: -200.63, y: 154.46, z: 154.99, yaw: 3.18}
+    - {x: -211.03, y: 151.05, z: 155.7, yaw: 1.29}
+    - {x: -190.94, y: 155.15, z: 154.33, yaw: 4.92}
+    - {x: -163.09, y: 146.89, z: 152.47, yaw: -170.45}
+    - {x: -163.48, y: 149.87, z: 152.47, yaw: -170.44}
+    - {x: -175.61, y: 144.98, z: 153.35, yaw: -172.34}
+    - {x: -183.88, y: 143.97, z: 153.93, yaw: -173.8}
+    - {x: -192.47, y: 146.16, z: 154.5, yaw: -175.27}
+    - {x: -199.35, y: 145.67, z: 154.96, yaw: -176.49}
+    - {x: -199.24, y: 142.67, z: 154.97, yaw: -176.51}
+    - {x: -137.2, y: 142.02, z: 152.0, yaw: -189.39}
+    - {x: -138.06, y: 139.13, z: 152.0, yaw: -190.66}
+    - {x: -124.18, y: 147.06, z: 152.0, yaw: -128.32}
+    - {x: -148.09, y: 159.63, z: 152.0, yaw: 72.85}
+    - {x: -143.9, y: 166.01, z: 152.0, yaw: 40.59}
+    - {x: -146.96, y: 143.91, z: 152.0, yaw: 134.19}
+  ratios:
+    car: 10
+    ambulance: 3
+    bus: 4
+    truck: 3
+    police_car: 4
+    fire_truck: 2
+    bike: 5
+output:
+  directory: ./dataset_output

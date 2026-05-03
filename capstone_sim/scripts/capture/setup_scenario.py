@@ -134,7 +134,10 @@ def main():
         'map': current_map,
         'cameras': cameras,
         'traffic_light': {
-            'id': selected_light.id
+            'id': selected_light.id,
+            'red_time': 3.0,
+            'green_time': 15.0,
+            'yellow_time': 2.0
         },
         'weather': {
             'cloudiness': 40.0,
@@ -160,7 +163,7 @@ def main():
         ],
         'simulation': {
             'total_frames': 7000,
-            'capture_interval': 2,
+            'capture_interval': 10,
             'warmup_frames': 60,
             'train_ratio': 0.8,
             'fixed_delta_seconds': 0.05
@@ -172,6 +175,7 @@ def main():
             'spawn_points': [],
             'respawn_interval': 40,
             'despawn_distance': 100.0,
+            'force_respawn_interval': 200,
             'ratios': {
                 'car': 10,
                 'ambulance': 3,

@@ -133,6 +133,9 @@ def run_recording(config_path, output_base, duration, fps):
 
     world = client.get_world()
 
+    # Remove parked vehicles from the map (they confuse the model)
+    world.unload_map_layer(carla.MapLayer.ParkedVehicles)
+
     bp_lib = world.get_blueprint_library()
     all_spawn_points = world.get_map().get_spawn_points()
 
