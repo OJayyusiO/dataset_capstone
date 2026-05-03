@@ -1,0 +1,44 @@
+scenario_name: town03_afternoon_medium_traffic
+camera:
+  location:
+    x: 22.18
+    y: 183.77
+    z: 6.96
+  rotation:
+    pitch: -37.66
+    yaw: 60.48
+    roll: 0.0
+  image_width: 1280
+  image_height: 720
+  fov: 70
+traffic_light:
+  id: 31
+weather:
+  cloudiness: 40.0
+  precipitation: 0.0
+  sun_altitude_angle: 2.0
+  fog_density: 0.0
+  wetness: 0.0
+simulation:
+  total_frames: 5000
+  capture_interval: 2
+  warmup_frames: 100
+  train_ratio: 0.8
+  fixed_delta_seconds: 0.05
+spawn:
+  max_vehicles: 30
+  spawn_radius: 90.0
+  radius_center: camera
+  spawn_points: []
+  respawn_interval: 50
+  despawn_distance: 100.0
+  ratios:
+    car: 15
+    ambulance: 2
+    bus: 2
+    truck: 3
+    police_car: 2
+    fire_truck: 1
+    bike: 4
+output:
+  directory: ./dataset_output

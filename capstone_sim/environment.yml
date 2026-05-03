@@ -9,3 +9,4 @@ dependencies:
       - numpy>=1.26,<2.0
       - opencv-python>=4.8
       - PyYAML>=6.0
+      - ultralytics>=8.3

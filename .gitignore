@@ -1,4 +1,9 @@
 .claude/
+__pycache__/
 dataset_output/
 dataset_output (old)/
+dataset_output.zip
 CARLA_0.9.16/
+runs/
+test_recordings/
+eval_results/
