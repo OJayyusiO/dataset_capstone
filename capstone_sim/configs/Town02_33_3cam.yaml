@@ -1,0 +1,137 @@
+scenario_name: Town02_33_3cam
+map: Town02
+cameras:
+- location:
+    x: 53.46
+    y: 185.48
+    z: 6.99
+  rotation:
+    pitch: -18.99
+    yaw: 14.42
+    roll: 0.0
+  image_width: 1280
+  image_height: 720
+  fov: 70
+- location:
+    x: 77.07
+    y: 182.5
+    z: 15.34
+  rotation:
+    pitch: -43.48
+    yaw: 146.66
+    roll: 0.0
+  image_width: 1280
+  image_height: 720
+  fov: 70
+- location:
+    x: 57.69
+    y: 185.62
+    z: 2.89
+  rotation:
+    pitch: -11.11
+    yaw: 29.69
+    roll: 0.0
+  image_width: 1280
+  image_height: 720
+  fov: 70
+traffic_light:
+  id: 33
+  red_time: 3.0
+  green_time: 15.0
+  yellow_time: 2.0
+weather:
+  cloudiness: 40.0
+  precipitation: 0.0
+  sun_altitude_angle: 25.0
+  fog_density: 0.0
+  wetness: 0.0
+weather_cycle:
+- sun_altitude_angle: 70
+  cloudiness: 5
+  precipitation: 0
+  fog_density: 0
+  wetness: 0
+- sun_altitude_angle: 45
+  cloudiness: 40
+  precipitation: 0
+  fog_density: 0
+  wetness: 0
+- sun_altitude_angle: 80
+  cloudiness: 90
+  precipitation: 0
+  fog_density: 0
+  wetness: 0
+- sun_altitude_angle: 8
+  cloudiness: 20
+  precipitation: 0
+  fog_density: 0
+  wetness: 0
+- sun_altitude_angle: 3
+  cloudiness: 50
+  precipitation: 0
+  fog_density: 0
+  wetness: 0
+- sun_altitude_angle: -30
+  cloudiness: 10
+  precipitation: 0
+  fog_density: 0
+  wetness: 0
+- sun_altitude_angle: -60
+  cloudiness: 30
+  precipitation: 0
+  fog_density: 0
+  wetness: 0
+- sun_altitude_angle: 35
+  cloudiness: 70
+  precipitation: 30
+  fog_density: 5
+  wetness: 30
+- sun_altitude_angle: 25
+  cloudiness: 90
+  precipitation: 80
+  fog_density: 15
+  wetness: 70
+- sun_altitude_angle: -15
+  cloudiness: 60
+  precipitation: 40
+  fog_density: 10
+  wetness: 50
+- sun_altitude_angle: 20
+  cloudiness: 60
+  precipitation: 0
+  fog_density: 40
+  wetness: 20
+- sun_altitude_angle: 10
+  cloudiness: 80
+  precipitation: 0
+  fog_density: 70
+  wetness: 10
+- sun_altitude_angle: 50
+  cloudiness: 30
+  precipitation: 0
+  fog_density: 0
+  wetness: 60
+simulation:
+  total_frames: 7000
+  capture_interval: 10
+  warmup_frames: 60
+  train_ratio: 0.8
+  fixed_delta_seconds: 0.05
+spawn:
+  max_vehicles: 25
+  spawn_radius: 80.0
+  radius_center: traffic_light
+  spawn_points: ["60-63",84,75,77,65,68]
+  respawn_interval: 40
+  despawn_distance: 100.0
+  force_respawn_interval: 200
+  ratios:
+    car: 10
+    ambulance: 3
+    bus: 4
+    truck: 3
+    police_car: 4
+    fire_truck: 2
+    bike: 5
+output:
+  directory: ./dataset_output

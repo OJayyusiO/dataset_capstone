@@ -1,0 +1,136 @@
+scenario_name: Town04_highway_2cam
+map: Town04
+cameras:
+- location:
+    x: 6.5
+    y: -266.59
+    z: 15.63
+  rotation:
+    pitch: -30.3
+    yaw: 148.27
+    roll: 0.0
+  image_width: 1280
+  image_height: 720
+  fov: 70
+- location:
+    x: -19.51
+    y: -244.47
+    z: 7.57
+  rotation:
+    pitch: -21.45
+    yaw: -68.2
+    roll: 0.0
+  image_width: 1280
+  image_height: 720
+  fov: 70
+traffic_light:
+  id: 132
+  red_time: 3.0
+  green_time: 15.0
+  yellow_time: 2.0
+weather:
+  cloudiness: 40.0
+  precipitation: 0.0
+  sun_altitude_angle: 25.0
+  fog_density: 0.0
+  wetness: 0.0
+weather_cycle:
+- sun_altitude_angle: 70
+  cloudiness: 5
+  precipitation: 0
+  fog_density: 0
+  wetness: 0
+- sun_altitude_angle: 45
+  cloudiness: 40
+  precipitation: 0
+  fog_density: 0
+  wetness: 0
+- sun_altitude_angle: 80
+  cloudiness: 90
+  precipitation: 0
+  fog_density: 0
+  wetness: 0
+- sun_altitude_angle: 8
+  cloudiness: 20
+  precipitation: 0
+  fog_density: 0
+  wetness: 0
+- sun_altitude_angle: 3
+  cloudiness: 50
+  precipitation: 0
+  fog_density: 0
+  wetness: 0
+- sun_altitude_angle: -30
+  cloudiness: 10
+  precipitation: 0
+  fog_density: 0
+  wetness: 0
+- sun_altitude_angle: -60
+  cloudiness: 30
+  precipitation: 0
+  fog_density: 0
+  wetness: 0
+- sun_altitude_angle: 35
+  cloudiness: 70
+  precipitation: 30
+  fog_density: 5
+  wetness: 30
+- sun_altitude_angle: 25
+  cloudiness: 90
+  precipitation: 80
+  fog_density: 15
+  wetness: 70
+- sun_altitude_angle: -15
+  cloudiness: 60
+  precipitation: 40
+  fog_density: 10
+  wetness: 50
+- sun_altitude_angle: 20
+  cloudiness: 60
+  precipitation: 0
+  fog_density: 40
+  wetness: 20
+- sun_altitude_angle: 10
+  cloudiness: 80
+  precipitation: 0
+  fog_density: 70
+  wetness: 10
+- sun_altitude_angle: 50
+  cloudiness: 30
+  precipitation: 0
+  fog_density: 0
+  wetness: 60
+simulation:
+  total_frames: 7000
+  capture_interval: 10
+  warmup_frames: 60
+  train_ratio: 0.8
+  fixed_delta_seconds: 0.05
+spawn:
+  max_vehicles: 25
+  spawn_radius: 80.0
+  radius_center: camera
+  spawn_points: [319,320]
+  custom_spawn_points:
+    - {x: 6.76, y: -284.91, z: 0.5, yaw: 113.03}
+    - {x: 3.44, y: -286.04, z: 0.5, yaw: 112.94}
+    - {x: 0.08, y: -287.07, z: 0.5, yaw: 112.82}
+    - {x: 12.7, y: -297.39, z: 0.5, yaw: 117.82}
+    - {x: 9.29, y: -305.73, z: 0.5, yaw: 119.74}
+    - {x: 15.21, y: -308.84, z: 0.5, yaw: 121.65}
+    - {x: 13.7, y: -313.02, z: 0.5, yaw: 122.57}
+    - {x: 9.18, y: -312.41, z: 0.5, yaw: 121.61}
+    - {x: 26.03, y: -318.6, z: 0.5, yaw: 126.5}
+  respawn_interval: 40
+  despawn_distance: 100.0
+  force_respawn_interval: 200
+  ratios:
+    car: 10
+    ambulance: 3
+    bus: 4
+    truck: 3
+    police_car: 4
+    fire_truck: 2
+    bike: 5
+output:
+  directory: ./dataset_output

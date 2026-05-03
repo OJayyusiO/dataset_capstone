@@ -110,7 +110,7 @@ def run_capture(config_path):
     output_config = config.get('output', {})
 
     total_frames = sim_config.get('total_frames', 5000)
-    capture_interval = sim_config.get('capture_interval', 2)
+    capture_interval = sim_config.get('capture_interval', 10)
     warmup_frames = sim_config.get('warmup_frames', 100)
     train_ratio = sim_config.get('train_ratio', 0.8)
     fixed_delta = sim_config.get('fixed_delta_seconds', 0.05)
@@ -118,6 +118,7 @@ def run_capture(config_path):
     max_vehicles = spawn_config.get('max_vehicles', 30)
     respawn_interval = spawn_config.get('respawn_interval', 50)
     despawn_distance = spawn_config.get('despawn_distance', 150.0)
+    force_respawn_interval = spawn_config.get('force_respawn_interval', 0)
     ratios = spawn_config.get('ratios', {
         'car': 15, 'ambulance': 2, 'bus': 2, 'truck': 3,
         'police_car': 2, 'fire_truck': 1, 'bike': 4
@@ -174,6 +175,9 @@ def run_capture(config_path):
             time.sleep(5)  # Wait for map to load
 
     world = client.get_world()
+
+    # Remove parked vehicles from the map (they confuse the model)
+    world.unload_map_layer(carla.MapLayer.ParkedVehicles)
 
     bp_lib = world.get_blueprint_library()
     all_spawn_points = world.get_map().get_spawn_points()
@@ -249,6 +253,18 @@ def run_capture(config_path):
             if selected_light:
                 light_location = selected_light.get_transform().location
                 print(f"Traffic light {light_id} found at ({light_location.x:.1f}, {light_location.y:.1f})")
+                # Apply custom traffic light timings if specified
+                light_config = config.get('traffic_light', {})
+                if 'red_time' in light_config:
+                    selected_light.set_red_time(light_config['red_time'])
+                if 'green_time' in light_config:
+                    selected_light.set_green_time(light_config['green_time'])
+                if 'yellow_time' in light_config:
+                    selected_light.set_yellow_time(light_config['yellow_time'])
+                if any(k in light_config for k in ['red_time', 'green_time', 'yellow_time']):
+                    print(f"  Timings: red={selected_light.get_red_time():.1f}s "
+                          f"green={selected_light.get_green_time():.1f}s "
+                          f"yellow={selected_light.get_yellow_time():.1f}s")
             else:
                 print(f"WARNING: Traffic light {light_id} not found, using camera location for spawn filtering")
 
@@ -271,14 +287,24 @@ def run_capture(config_path):
                     parts = entry.split('-')
                     start, end = int(parts[0]), int(parts[1])
                     selected_indices.extend(range(start, end + 1))
-        if selected_indices:
+        # Add custom spawn points from config
+        custom_spawns = spawn_config.get('custom_spawn_points', [])
+        custom_transforms = []
+        for cs in custom_spawns:
+            loc = carla.Location(x=cs['x'], y=cs['y'], z=cs.get('z', 0.5))
+            rot = carla.Rotation(yaw=cs.get('yaw', 0.0))
+            custom_transforms.append(carla.Transform(loc, rot))
+
+        if selected_indices or custom_transforms:
             spawn_points = []
             for idx in selected_indices:
                 if 0 <= idx < len(all_spawn_points):
                     spawn_points.append(all_spawn_points[idx])
                 else:
                     print(f"WARNING: Spawn point index {idx} out of range (0-{len(all_spawn_points)-1})")
-            print(f"Using {len(spawn_points)} manually selected spawn points")
+            spawn_points.extend(custom_transforms)
+            print(f"Using {len(spawn_points)} spawn points "
+                  f"({len(selected_indices)} from map, {len(custom_transforms)} custom)")
         else:
             ref_label = 'camera' if radius_center == 'camera' else ('traffic light' if light_location else 'camera')
             spawn_points = [
@@ -344,8 +370,25 @@ def run_capture(config_path):
                         traffic_manager.vehicle_percentage_speed_difference(v, 30.0)
                 vehicles_spawned = True
 
+            # Force respawn: kill all vehicles and respawn to clear stuck/repetitive scenes
+            frames_since_warmup = frame - warmup_frames
+            if force_respawn_interval > 0 and frames_since_warmup > 0 and frames_since_warmup % force_respawn_interval == 0:
+                for actor, _ in current_vehicles:
+                    if actor.is_alive:
+                        actor.destroy()
+                current_vehicles.clear()
+                world.tick()
+                spawned = spawn_to_fill(world, bp_lib, tm_port, class_bps,
+                                        target_counts, current_vehicles, spawn_points)
+                for v, cls_id in current_vehicles:
+                    if cls_id == 6:
+                        traffic_manager.vehicle_percentage_speed_difference(v, 50.0)
+                    else:
+                        traffic_manager.vehicle_percentage_speed_difference(v, 30.0)
+                print(f"  Forced respawn at frame {frame}: {spawned} fresh vehicles")
+
             # Respawn cycle: despawn far vehicles, spawn new ones to fill
-            if frame > 0 and frame % respawn_interval == 0:
+            elif frame > 0 and frame % respawn_interval == 0:
                 removed = despawn_far_vehicles(current_vehicles, reference_location,
                                                despawn_distance)
                 spawned = spawn_to_fill(world, bp_lib, tm_port, class_bps,
@@ -359,13 +402,26 @@ def run_capture(config_path):
                     except RuntimeError:
                         pass
 
-            # Weather cycling
+            # Weather cycling — despawn all vehicles and respawn fresh ones on weather change
             if weather_presets and frames_per_weather > 0:
                 frames_since_warmup = frame - warmup_frames
                 preset_idx = min(frames_since_warmup // frames_per_weather, len(weather_presets) - 1)
                 if frames_since_warmup > 0 and frames_since_warmup % frames_per_weather == 0 and preset_idx < len(weather_presets):
                     apply_weather(world, weather_presets[preset_idx])
-                    print(f"  Weather preset {preset_idx + 1}/{len(weather_presets)} applied")
+                    # Destroy all vehicles and respawn to clear stuck ones
+                    for actor, _ in current_vehicles:
+                        if actor.is_alive:
+                            actor.destroy()
+                    current_vehicles.clear()
+                    world.tick()  # Let CARLA process the destroys
+                    spawned = spawn_to_fill(world, bp_lib, tm_port, class_bps,
+                                            target_counts, current_vehicles, spawn_points)
+                    for v, cls_id in current_vehicles:
+                        if cls_id == 6:
+                            traffic_manager.vehicle_percentage_speed_difference(v, 50.0)
+                        else:
+                            traffic_manager.vehicle_percentage_speed_difference(v, 30.0)
+                    print(f"  Weather preset {preset_idx + 1}/{len(weather_presets)} applied, respawned {spawned} vehicles")
 
             # Capture at interval
             if (frame - warmup_frames) % capture_interval != 0:
