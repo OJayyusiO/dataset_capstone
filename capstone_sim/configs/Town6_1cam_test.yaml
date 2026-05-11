@@ -1,0 +1,117 @@
+scenario_name: Town6_1cam_test
+map: Town06
+cameras:
+- location:
+    x: 2.6
+    y: -27.8
+    z: 17.11
+  rotation:
+    pitch: -37.22
+    yaw: -132.17
+    roll: 0.0
+  image_width: 1280
+  image_height: 720
+  fov: 70
+traffic_light:
+  id: 239
+  red_time: 3.0
+  green_time: 15.0
+  yellow_time: 2.0
+weather:
+  cloudiness: 40.0
+  precipitation: 0.0
+  sun_altitude_angle: 25.0
+  fog_density: 0.0
+  wetness: 0.0
+weather_cycle:
+- sun_altitude_angle: 70
+  cloudiness: 5
+  precipitation: 0
+  fog_density: 0
+  wetness: 0
+- sun_altitude_angle: 45
+  cloudiness: 40
+  precipitation: 0
+  fog_density: 0
+  wetness: 0
+- sun_altitude_angle: 80
+  cloudiness: 90
+  precipitation: 0
+  fog_density: 0
+  wetness: 0
+- sun_altitude_angle: 8
+  cloudiness: 20
+  precipitation: 0
+  fog_density: 0
+  wetness: 0
+- sun_altitude_angle: 3
+  cloudiness: 50
+  precipitation: 0
+  fog_density: 0
+  wetness: 0
+- sun_altitude_angle: -30
+  cloudiness: 10
+  precipitation: 0
+  fog_density: 0
+  wetness: 0
+- sun_altitude_angle: -60
+  cloudiness: 30
+  precipitation: 0
+  fog_density: 0
+  wetness: 0
+- sun_altitude_angle: 35
+  cloudiness: 70
+  precipitation: 30
+  fog_density: 5
+  wetness: 30
+- sun_altitude_angle: 25
+  cloudiness: 90
+  precipitation: 80
+  fog_density: 15
+  wetness: 70
+- sun_altitude_angle: -15
+  cloudiness: 60
+  precipitation: 40
+  fog_density: 10
+  wetness: 50
+- sun_altitude_angle: 20
+  cloudiness: 60
+  precipitation: 0
+  fog_density: 40
+  wetness: 20
+- sun_altitude_angle: 10
+  cloudiness: 80
+  precipitation: 0
+  fog_density: 70
+  wetness: 10
+- sun_altitude_angle: 50
+  cloudiness: 30
+  precipitation: 0
+  fog_density: 0
+  wetness: 60
+simulation:
+  total_frames: 7000
+  capture_interval: 10
+  warmup_frames: 60
+  train_ratio: 0.8
+  fixed_delta_seconds: 0.05
+spawn:
+  max_vehicles: 25
+  spawn_radius: 80.0
+  radius_center: camera
+  spawn_points: [368,369,370]
+  respawn_interval: 40
+  despawn_distance: 100.0
+  force_respawn_interval: 0
+  stuck_check_interval: 600
+  stuck_threshold_m: 1.0
+  ratios:
+    car: 10
+    ambulance: 1
+    bus: 1
+    truck: 2
+    police_car: 1
+    fire_truck: 1
+    bike: 3
+output:
+  directory: ./dataset_output

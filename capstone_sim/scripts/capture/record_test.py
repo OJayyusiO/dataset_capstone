@@ -80,6 +80,9 @@ def run_recording(config_path, output_base, duration, fps):
     max_vehicles = spawn_config.get('max_vehicles', 30)
     respawn_interval = spawn_config.get('respawn_interval', 50)
     despawn_distance = spawn_config.get('despawn_distance', 150.0)
+    force_respawn_interval = spawn_config.get('force_respawn_interval', 0)
+    stuck_check_interval = spawn_config.get('stuck_check_interval', 600)
+    stuck_threshold_m = spawn_config.get('stuck_threshold_m', 1.0)
     ratios = spawn_config.get('ratios', {
         'car': 15, 'ambulance': 2, 'bus': 2, 'truck': 3,
         'police_car': 2, 'fire_truck': 1, 'bike': 4
@@ -229,6 +232,8 @@ def run_recording(config_path, output_base, duration, fps):
 
         vehicles_spawned = False
         frame_counter = 0
+        # Track each vehicle's position from N frames ago for stuck detection
+        last_check_positions = {}
         start_time = time.time()
 
         print(f"\nRecording {total_frames} frames...")
@@ -275,8 +280,26 @@ def run_recording(config_path, output_base, duration, fps):
                         traffic_manager.vehicle_percentage_speed_difference(v, 30.0)
                 vehicles_spawned = True
 
+            # Force respawn: kill all vehicles and respawn (breaks tracking IDs but clears stuck scenes)
+            frames_since_warmup = frame - warmup_frames
+            if force_respawn_interval > 0 and frames_since_warmup > 0 and frames_since_warmup % force_respawn_interval == 0:
+                for actor, _ in current_vehicles:
+                    if actor.is_alive:
+                        actor.destroy()
+                current_vehicles.clear()
+                last_check_positions.clear()
+                world.tick()
+                spawned = spawn_to_fill(world, bp_lib, tm_port, class_bps,
+                                        target_counts, current_vehicles, spawn_points)
+                for v, cls_id in current_vehicles:
+                    if cls_id == 6:
+                        traffic_manager.vehicle_percentage_speed_difference(v, 50.0)
+                    else:
+                        traffic_manager.vehicle_percentage_speed_difference(v, 30.0)
+                print(f"  Forced respawn at frame {frame}: {spawned} fresh vehicles")
+
             # Respawn cycle
-            if frame > 0 and frame % respawn_interval == 0:
+            elif frame > 0 and frame % respawn_interval == 0:
                 despawn_far_vehicles(current_vehicles, reference_location, despawn_distance)
                 spawn_to_fill(world, bp_lib, tm_port, class_bps,
                               target_counts, current_vehicles, spawn_points)
@@ -288,6 +311,44 @@ def run_recording(config_path, output_base, duration, fps):
                             traffic_manager.vehicle_percentage_speed_difference(v, 30.0)
                     except RuntimeError:
                         pass
+
+            # Stuck vehicle check: destroy vehicles that haven't moved enough since last check
+            if stuck_check_interval > 0 and frames_since_warmup > 0 and frames_since_warmup % stuck_check_interval == 0:
+                alive = []
+                stuck_count = 0
+                for actor, cls_id in current_vehicles:
+                    if not actor.is_alive:
+                        continue
+                    current_pos = actor.get_transform().location
+                    actor_id = actor.id
+
+                    if actor_id in last_check_positions:
+                        prev_pos = last_check_positions[actor_id]
+                        distance_moved = current_pos.distance(prev_pos)
+                        if distance_moved < stuck_threshold_m:
+                            actor.destroy()
+                            stuck_count += 1
+                            del last_check_positions[actor_id]
+                            continue
+
+                    last_check_positions[actor_id] = current_pos
+                    alive.append((actor, cls_id))
+
+                current_vehicles.clear()
+                current_vehicles.extend(alive)
+
+                if stuck_count > 0:
+                    spawned = spawn_to_fill(world, bp_lib, tm_port, class_bps,
+                                            target_counts, current_vehicles, spawn_points)
+                    for v, cls_id in current_vehicles:
+                        try:
+                            if cls_id == 6:
+                                traffic_manager.vehicle_percentage_speed_difference(v, 50.0)
+                            else:
+                                traffic_manager.vehicle_percentage_speed_difference(v, 30.0)
+                        except RuntimeError:
+                            pass
+                    print(f"  Removed {stuck_count} stuck vehicle(s), respawned {spawned}")
 
             # Save frames and ground truth for each camera
             for ci, raw_img in enumerate(latest_images):
