@@ -176,6 +176,8 @@ def main():
             'respawn_interval': 40,
             'despawn_distance': 100.0,
             'force_respawn_interval': 200,
+            'stuck_check_interval': 600,
+            'stuck_threshold_m': 1.0,
             'ratios': {
                 'car': 10,
                 'ambulance': 3,
