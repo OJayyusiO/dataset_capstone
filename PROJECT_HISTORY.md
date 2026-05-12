@@ -607,6 +607,115 @@ Tried to fine-tune `best.pt` further on the cloud (vast.ai L40S):
 
 ---
 
+## Phase 10: Traffic Analytics System — V3.0 (May 12, 2026)
+
+> *Beyond detection metrics: real-world traffic measurements built on top of the trained model.*
+
+### Why
+Detection metrics (precision, recall, MOTA) measure how well the model *sees* — but a real deployment needs **traffic analytics**: how fast are vehicles going? How many are queued? When the original capstone scope mentioned speed estimation and queue length, these became the demo features that show the system as a complete traffic monitoring product, not just a model.
+
+### Architecture
+A new `capstone_sim/scripts/analytics/` folder was added:
+- `setup_analytics.py` — One-time configuration: camera calibration + lane definition
+- `traffic_analytics.py` — Run analytics on a recorded video / frame sequence
+- `live_analytics.py` — Same analytics live during a running CARLA simulation
+
+Configurations saved per-scenario to `capstone_sim/analytics_configs/<scenario>.yaml`. Run outputs (CSVs + video) saved to `capstone_sim/analytics_runs/<scenario>_<timestamp>/`.
+
+### Calibration
+
+The hardest part of building real-world analytics: knowing what a "pixel" means in real meters. Two paths:
+
+**For CARLA recordings (fully automatic):**
+- Camera intrinsics + extrinsics are known exactly
+- 4 sample pixels in the lower part of the image are projected onto the ground plane via ray-camera math
+- `cv2.findHomography` builds the 3x3 image→world matrix
+- **Zero user input needed** — happens automatically at end of `record_test.py`
+
+**For real video (manual 4-point homography):**
+- User clicks 4 corners of a known rectangle on the ground (e.g., lane markings, parking spot)
+- Types the real-world dimensions (e.g., 3.5m wide × 12m long)
+- Same homography computation
+- This is the **industry standard** approach used by commercial traffic systems
+
+### Speed Per Vehicle
+- For each tracked vehicle, take a reference point on the bounding box (at 50% width, 85% height — slightly above the very bottom to avoid bumper artifacts)
+- Apply homography → world (X, Y) in meters
+- Speed = displacement / frame interval, smoothed over a 5-frame rolling average
+- Color-coded labels in the video: gray (stopped), green (slow), yellow (normal), red (fast)
+
+### Per-Lane Queue Counts
+
+Interactive lane definition: click polygon corners around each lane, give it an ID. Saved to YAML.
+
+Per-frame logic:
+1. For each detection: is its speed below `speed_threshold_kmh` AND has it been below for `min_stationary_seconds`? (Both configurable in YAML)
+2. If yes: which lane polygon is it in?
+3. Increment that lane's queue count
+
+Configurable thresholds in `analytics_config.yaml`:
+```yaml
+queue:
+  speed_threshold_kmh: 7.2      # below this = "slow"
+  min_stationary_seconds: 2.0   # must be slow this long to count as queued
+```
+
+The 2-second threshold prevents false positives from vehicles briefly slowing down (e.g., turning).
+
+### Key Design Decisions
+
+**Camera reference point for ground projection**
+- Started with bbox bottom-center → gave incorrect lane assignment for large vehicles like fire trucks (the protruding bumper hit the ground at a different point than the truck's actual center)
+- Final: 50% horizontal × 85% vertical of bbox — closer to the middle of the vehicle body, more stable for lane assignment
+
+**Multi-pass calibration math**
+- First attempt: manual rotation matrix using CARLA's pitch/yaw/roll — failed because CARLA uses non-standard rotation conventions (positive pitch = nose up)
+- Fix: use `carla.Transform.get_forward_vector()` etc. directly — CARLA's API handles its own conventions correctly
+
+**Per-scenario configs in dedicated folder**
+- Originally tried saving `analytics_config.yaml` next to the scenario YAML — mixed configs with scenarios
+- Final: separate `analytics_configs/` folder; each file named to match the scenario's stem (`Town6_1cam.yaml`)
+
+**Two interfaces: live + recorded**
+- `live_analytics.py` works on a running CARLA simulation — spawns traffic from scenario, computes analytics in real time, includes the full spawn lifecycle (respawn, despawn, stuck detection) from `record_test.py`
+- `traffic_analytics.py` works on any recorded video or frame sequence — same outputs, different input
+
+### Output Format
+
+Each analytics run produces:
+- **`live_analytics.mp4` / `analytics.mp4`** — Annotated video with speed labels and per-lane queue overlays
+- **`per_track.csv`** — Every detection at every frame: `frame, track_id, class, world_x, world_y, speed_mps, speed_kmh`
+- **`per_lane_queue.csv`** — `frame, lane_id_1_count, lane_id_2_count, ...`
+- **`summary.json`** — Final stats: avg/max speed, max queue per lane, unique tracks, FPS
+
+### Industry Comparison
+The 4-point homography calibration is the same method used by commercial traffic systems like:
+- Iteris VantageNext (lane occupancy + queue length)
+- Econolite SPM (traffic light scheduling based on queue)
+- Cisco Meraki MV traffic analytics
+
+External calibrations (e.g., from camera mount specs or GPS drives) can be plugged in by writing the same homography matrix to `analytics_config.yaml`.
+
+### Challenges & Solutions
+
+**Challenge 1: CARLA's non-standard rotation conventions**
+- Manual rotation math produced wrong-direction rays that didn't hit the ground plane
+- Fix: use `carla.Transform.get_forward_vector()` directly
+
+**Challenge 2: numpy types in YAML output**
+- Initial dump produced `!!python/object/apply:numpy.core.multiarray.scalar` tags that couldn't be parsed back
+- Fix: cast all numpy values to native Python `int`/`float` before serialization
+
+**Challenge 3: Live mode wasn't following scenario rules**
+- Initial `live_analytics.py` only did one spawn at startup, missing respawn/despawn/stuck behavior
+- Fix: ported the full spawn lifecycle from `record_test.py`
+
+**Challenge 4: Lane assignment was off for large vehicles**
+- Bbox bottom-center put fire trucks in the wrong lane (front bumper protrudes left)
+- Fix: shifted reference point to 50% × 85% of bbox
+
+---
+
 ## Final Test Results
 
 Tested final model on `town02_test` recording (4,979 frames):
@@ -660,6 +769,8 @@ dataset_capstone/
     ├── configs/                   # 16 scenario YAMLs
     ├── models/yolov11m/
     │   └── best.pt                # final trained model
+    ├── analytics_configs/         # per-scenario analytics setups (V3.0)
+    ├── analytics_runs/            # gitignored — per-run output folders
     └── scripts/
         ├── capture/
         │   ├── capture_dataset.py
@@ -675,6 +786,10 @@ dataset_capstone/
         │   ├── analyze_dataset.py
         │   ├── generate_report.py
         │   └── inference.py
+        ├── analytics/             # V3.0
+        │   ├── setup_analytics.py
+        │   ├── traffic_analytics.py
+        │   └── live_analytics.py
         └── utils/
             ├── constants.py
             ├── bbox.py
@@ -682,7 +797,8 @@ dataset_capstone/
             ├── switch_map.py
             ├── visualize_spawns.py
             ├── visualize_traffic_lights.py
-            └── create_spawn_points.py
+            ├── create_spawn_points.py
+            └── frames_to_video.py
 ```
 
 ---
@@ -705,8 +821,9 @@ dataset_capstone/
 | `big_changes` | First major feature batch (capture_dataset.py) | Merged (PR #1) |
 | `model-training-and-testing` | YOLO training experiments | Standalone |
 | `V2` | Restructure + multi-camera + evaluation | Merged (PR #2) |
-| `V2.1` | Inference + custom spawn points + refinements | Open PR |
-| `V2.2` | Stuck vehicle detection + frames_to_video utility | Open PR |
+| `V2.1` | Inference + custom spawn points + refinements | Merged |
+| `V2.2` | Stuck vehicle detection + frames_to_video utility | Merged |
+| `V3.0` | Traffic analytics: calibration, speed, queue per lane | Open PR |
 
 ---
 
@@ -739,3 +856,4 @@ dataset_capstone/
 | **2026-05-02** | Cloud training on vast.ai L40S — 0.949 mAP50 | dataset_capstone |
 | **2026-05-03** | Inference on real video, custom spawn points, traffic light viz, V2.1 PR | dataset_capstone |
 | **2026-05-11** | Continued training attempt (abandoned), stuck vehicle detection, frames_to_video utility, V2.2 | dataset_capstone |
+| **2026-05-12** | Traffic analytics system: calibration, speed per car, per-lane queue length, live + recorded modes, V3.0 | dataset_capstone |

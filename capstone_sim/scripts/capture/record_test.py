@@ -385,6 +385,19 @@ def run_recording(config_path, output_base, duration, fps):
 
     finally:
         # Save recording metadata first (before cleanup which may fail)
+        # Include camera transforms (location + rotation) so analytics can compute
+        # accurate ground-plane homography from camera intrinsics + extrinsics
+        cameras_meta = []
+        for ci, cc in enumerate(camera_configs):
+            cameras_meta.append({
+                'index': ci,
+                'location': cc['location'],
+                'rotation': cc['rotation'],
+                'image_width': cam_params[ci]['w'],
+                'image_height': cam_params[ci]['h'],
+                'fov': cam_params[ci]['fov'],
+            })
+
         meta = {
             'scenario_config': str(Path(config_path).name),
             'scenario_name': scenario_name,
@@ -396,10 +409,27 @@ def run_recording(config_path, output_base, duration, fps):
             'fov': cam_params[0]['fov'],
             'fps': fps,
             'fixed_delta_seconds': fixed_delta,
+            'cameras': cameras_meta,
             'class_names': CLASS_NAMES,
         }
         with open(recording_dir / 'recording_meta.yaml', 'w') as f:
             yaml.dump(meta, f, default_flow_style=False, sort_keys=False)
+
+        # Auto-generate analytics_config.yaml with calibration from camera intrinsics
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+            from capstone_sim.scripts.analytics.setup_analytics import auto_calibrate_from_carla
+            calibration = auto_calibrate_from_carla(recording_dir / 'recording_meta.yaml')
+            if calibration:
+                analytics_config = {
+                    'source': recording_dir.name,
+                    'calibration': calibration,
+                }
+                with open(recording_dir / 'analytics_config.yaml', 'w') as f:
+                    yaml.dump(analytics_config, f, default_flow_style=False, sort_keys=False)
+                print(f"  Auto-generated analytics_config.yaml with calibration")
+        except Exception as e:
+            print(f"  Note: could not auto-generate analytics_config.yaml: {e}")
 
         for cam in cameras:
             cam.stop()

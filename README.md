@@ -279,15 +279,98 @@ python capstone_sim/scripts/evaluate/evaluate_model.py test_recordings/my_test m
 
 ---
 
+## Traffic Analytics (live + recorded)
+
+Beyond detection metrics, the system can compute **real-world traffic metrics** like per-vehicle speed and per-lane queue length, using camera calibration to convert pixels to world meters.
+
+### 1. Setup analytics (once per scenario / video)
+
+For CARLA scenarios — calibration is fully automatic from camera intrinsics + extrinsics. You only need to define lanes:
+
+```bash
+python capstone_sim/scripts/analytics/setup_analytics.py capstone_sim/configs/Town6_1cam.yaml
+```
+
+This connects to CARLA, spawns the scenario camera, captures one frame, auto-calibrates, then lets you click polygon corners for each lane. Saves to `capstone_sim/analytics_configs/<scenario>.yaml`.
+
+For real video / CCTV — calibration is manual (click 4 corners of a known rectangle):
+
+```bash
+python capstone_sim/scripts/analytics/setup_analytics.py path/to/video.mp4
+```
+
+Source can also be a recording directory, webcam (`0`), or RTSP stream URL.
+
+**Useful flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--recalibrate` | Redo calibration |
+| `--redo-lanes` | Wipe existing lanes and define fresh |
+| `--manual` | Force manual calibration |
+
+### 2. Run live analytics on CARLA
+
+```bash
+python capstone_sim/scripts/analytics/live_analytics.py capstone_sim/configs/Town6_1cam.yaml capstone_sim/models/yolov11m/best.pt
+```
+
+Spawns traffic from the scenario, runs detection + tracking + speed + per-lane queue counts in real time. Saves results to `capstone_sim/analytics_runs/<scenario>_<timestamp>/`.
+
+| Flag | Description |
+|------|-------------|
+| `--save-video` | Save the annotated feed as MP4 |
+| `--no-spawn` | Skip spawning vehicles (use if CARLA already has traffic) |
+| `--conf` / `--iou` | Detection thresholds |
+
+### 3. Run analytics on a recorded video
+
+```bash
+python capstone_sim/scripts/analytics/traffic_analytics.py test_recordings/<recording_dir> capstone_sim/models/yolov11m/best.pt
+```
+
+Same outputs as live mode, but on recorded footage.
+
+### Outputs
+
+Both live and recorded analytics save:
+- `live_analytics.mp4` / `analytics.mp4` — Annotated video with speed labels and per-lane queue overlays
+- `per_track.csv` — Per-frame, per-track: track_id, class, world_x, world_y, speed
+- `per_lane_queue.csv` — Per-frame queue count for each lane
+- `summary.json` — Final stats: avg/max speed, max queue per lane, unique tracks, FPS
+
+### Queue thresholds
+
+Configurable in `analytics_config.yaml`:
+
+```yaml
+queue:
+  speed_threshold_kmh: 7.2          # below this = "slow"
+  min_stationary_seconds: 2.0        # must be slow for this long to count as queued
+```
+
+---
+
 ## Scripts Reference
 
 | Script | Location | Purpose |
 |--------|----------|---------|
 | `switch_map.py` | `scripts/utils/` | Load a CARLA map by name |
 | `visualize_spawns.py` | `scripts/utils/` | Draw numbered spawn point markers in CARLA |
+| `visualize_traffic_lights.py` | `scripts/utils/` | Draw numbered traffic light markers in CARLA |
+| `create_spawn_points.py` | `scripts/utils/` | Capture custom spawn points by flying spectator |
+| `frames_to_video.py` | `scripts/utils/` | Convert PNG frame sequences to MP4 |
 | `setup_scenario.py` | `scripts/capture/` | Position camera and select traffic light |
 | `capture_dataset.py` | `scripts/capture/` | Capture YOLO-format dataset |
 | `record_test.py` | `scripts/capture/` | Record test footage with ground truth |
+| `batch_capture.py` | `scripts/capture/` | Run multiple scenario configs sequentially |
 | `train.py` | `scripts/train/` | Train YOLOv11 model |
 | `evaluate_model.py` | `scripts/evaluate/` | Run detection + tracking evaluation |
 | `visualize_metrics.py` | `scripts/evaluate/` | Generate metric charts |
+| `compare_models.py` | `scripts/evaluate/` | Side-by-side comparison of multiple models |
+| `analyze_dataset.py` | `scripts/evaluate/` | Class distribution, imbalance warnings |
+| `generate_report.py` | `scripts/evaluate/` | Auto-generated HTML report |
+| `inference.py` | `scripts/evaluate/` | Run model on any MP4/webcam |
+| `setup_analytics.py` | `scripts/analytics/` | Calibration + lane definition |
+| `traffic_analytics.py` | `scripts/analytics/` | Speed + queue on recorded video |
+| `live_analytics.py` | `scripts/analytics/` | Speed + queue live on CARLA simulation |

@@ -9,3 +9,4 @@ test_recordings/
 eval_results/
 custom_spawn_points.yaml
 comparison_results/
+analytics_runs/
