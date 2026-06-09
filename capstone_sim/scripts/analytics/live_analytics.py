@@ -45,6 +45,7 @@ from capstone_sim.scripts.analytics.traffic_analytics import (
     SpeedTracker, QueueTracker, draw_detection, pixel_to_world,
     compute_queue_counts, draw_lanes_overlay,
     vehicle_ground_point, ViolationDetector, draw_forbidden_lines,
+    EntryCounter, draw_entry_zones,
     DEFAULT_QUEUE_SPEED_KMH, DEFAULT_QUEUE_MIN_STATIONARY_SECONDS,
 )
 
@@ -111,12 +112,14 @@ def run(scenario_path, model_path, save_video, spawn_traffic, conf, iou,
     lanes = []
     queue_cfg = {}
     forbidden_lines = []
+    entry_zones = []
     if analytics_config_path:
         with open(analytics_config_path) as f:
             ac = yaml.safe_load(f)
         lanes = ac.get('lanes', [])
         queue_cfg = ac.get('queue', {})
         forbidden_lines = ac.get('forbidden_lines', [])
+        entry_zones = ac.get('entry_zones', [])
         if 'calibration' in ac:
             calibration = ac['calibration']
             print(f"Using calibration + {len(lanes)} lane(s) from {analytics_config_path}")
@@ -136,6 +139,7 @@ def run(scenario_path, model_path, save_video, spawn_traffic, conf, iou,
     queue_speed_kmh = queue_cfg.get('speed_threshold_kmh', DEFAULT_QUEUE_SPEED_KMH)
     queue_min_seconds = queue_cfg.get('min_stationary_seconds', DEFAULT_QUEUE_MIN_STATIONARY_SECONDS)
     violation_detector = ViolationDetector(forbidden_lines)
+    entry_counter = EntryCounter(entry_zones)
 
     # Camera params (use first camera)
     if 'cameras' in scenario:
@@ -257,10 +261,19 @@ def run(scenario_path, model_path, save_video, spawn_traffic, conf, iou,
             violation_csv_writer = csv.writer(violation_csv_file)
             violation_csv_writer.writerow(['frame', 'track_id', 'line_id', 'light_state'])
 
+        entry_csv_file = None
+        entry_csv_writer = None
+        if entry_zones:
+            entry_csv_path = output_dir / 'entries.csv'
+            entry_csv_file = open(entry_csv_path, 'w', newline='')
+            entry_csv_writer = csv.writer(entry_csv_file)
+            entry_csv_writer.writerow(['frame', 'track_id', 'zone_id', 'light_state'])
+
         # Stats trackers for summary
         max_queue_per_lane = defaultdict(int)
         speed_samples = []  # all per-detection speeds in m/s
         total_violations = 0
+        total_entries = 0
 
         # Set up spawn lifecycle from scenario YAML (matches record_test.py)
         spawn_config = scenario.get('spawn', {})
@@ -489,6 +502,15 @@ def run(scenario_path, model_path, save_video, spawn_traffic, conf, iou,
                     print(f"  VIOLATION: track #{v['track_id']} crossed {v['line_id']} on red (frame {frame_idx})")
                 draw_forbidden_lines(frame, forbidden_lines, active_violation=bool(violations_now))
 
+            # Highway entry counting
+            if entry_zones:
+                entries_now = entry_counter.check(frame_detections, light_state, frame_idx)
+                for e in entries_now:
+                    total_entries += 1
+                    if entry_csv_writer:
+                        entry_csv_writer.writerow([e['frame'], e['track_id'], e['zone_id'], e['light_state']])
+                draw_entry_zones(frame, entry_zones, entry_counter)
+
             # Traffic light indicator
             if light_provider.available:
                 draw_light_indicator(frame, light_state)
@@ -505,6 +527,8 @@ def run(scenario_path, model_path, save_video, spawn_traffic, conf, iou,
             elapsed = time.time() - start_time
             real_fps = (frame_idx + 1) / max(elapsed, 0.001)
             hud = f"Frame {frame_idx}  |  {real_fps:.1f} FPS  |  Tracks: {len(track_ids_seen)}  |  Violations: {total_violations}"
+            if entry_zones:
+                hud += f"  |  Entries: {total_entries}"
             cv2.putText(frame, hud, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
                         (255, 255, 255), 2)
 
@@ -541,6 +565,8 @@ def run(scenario_path, model_path, save_video, spawn_traffic, conf, iou,
             queue_csv_file.close()
         if violation_csv_file:
             violation_csv_file.close()
+        if entry_csv_file:
+            entry_csv_file.close()
 
         # Write summary JSON BEFORE the CARLA cleanup (which can throw if the
         # simulator state changed), so the run summary is always saved.
@@ -561,9 +587,11 @@ def run(scenario_path, model_path, save_video, spawn_traffic, conf, iou,
                 'max_speed_kmh': round(max_speed_mps * 3.6, 1),
                 'max_queue_per_lane': dict(max_queue_per_lane),
                 'total_red_light_violations': total_violations,
+                'entry_counts': entry_counter.summary(),
                 'calibration_mode': calibration.get('mode'),
                 'num_lanes': len(lanes),
                 'num_forbidden_lines': len(forbidden_lines),
+                'num_entry_zones': len(entry_zones),
             }
             with open(output_dir / 'summary.json', 'w') as f:
                 json.dump(summary, f, indent=2)
@@ -575,6 +603,8 @@ def run(scenario_path, model_path, save_video, spawn_traffic, conf, iou,
                     print(f"  Max queue in {lid}: {count}")
             if forbidden_lines:
                 print(f"  Red-light violations: {total_violations}")
+            if entry_zones:
+                print(f"  Entry counts: {entry_counter.summary()}")
             print(f"\nResults saved to: {output_dir.resolve()}")
         except Exception as e:
             print(f"  Warning: could not write summary.json: {e}")

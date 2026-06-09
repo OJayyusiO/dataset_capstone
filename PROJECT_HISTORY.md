@@ -755,6 +755,31 @@ CARLA autopilot vehicles obey traffic lights by default, so a normal run shows z
 
 ---
 
+## Phase 12: Highway Entry Counting — V3.0 (June 2026)
+
+> *The last of the original analytics deliverables, reusing the light state and polygon infrastructure already in place.*
+
+### Why
+Highway on-ramps are often metered by traffic lights. The deliverable: count how many vehicles enter each ramp/entry zone, broken down by the light state at the moment of entry — directly useful for ramp-metering analytics and for spotting vehicles entering on red.
+
+### Implementation
+Because light state (`LightStateProvider`) and polygon definition (`PolygonPicker`, used for lanes) already existed, this was mostly composition:
+- `setup_analytics.py` — Step 4 adds an entry-zone polygon picker (`--redo-entry-zones`), saved as `entry_zones: [{id, polygon}]`
+- `traffic_analytics.py` — `EntryCounter` counts each unique vehicle once per zone, on the frame it first transitions outside→inside, recording the light state at entry. Logs `entries.csv` (frame, track_id, zone_id, light_state); per-zone totals broken down by light go to `summary.json` and the overlay/HUD
+- `live_analytics.py` — same, live
+
+### Key Design Decisions
+- **Count once per (track_id, zone)** — a vehicle entering is counted a single time even if detection jitter or re-entry occurs at the boundary, avoiding inflated counts
+- **Entry edge detection** — outside→inside transition (not just "currently inside"), so a vehicle already in the zone at spawn isn't miscounted later
+- **Grouped by light state** — `{zone: {total, by_light: {green, red, ...}}}` so "entered on red" is directly visible (the ramp-metering violation signal)
+
+Geometry was unit-tested before integration: entry on green and red recorded correctly, no double-count on re-entry, summary totals accurate.
+
+### Status
+This completes all of the originally-scoped analytics features. Remaining: collision detection (stretch goal, may be skipped).
+
+---
+
 ## Final Test Results
 
 Tested final model on `town02_test` recording (4,979 frames):
@@ -897,3 +922,4 @@ dataset_capstone/
 | **2026-05-11** | Continued training attempt (abandoned), stuck vehicle detection, frames_to_video utility, V2.2 | dataset_capstone |
 | **2026-05-12** | Traffic analytics system: calibration, speed per car, per-lane queue length, live + recorded modes, V3.0 | dataset_capstone |
 | **2026-06-09** | Light state plumbing, forbidden-line picker, red-light violation detection, `k` demo toggle | dataset_capstone |
+| **2026-06-09** | Highway entry zones + entry counting grouped by light state | dataset_capstone |

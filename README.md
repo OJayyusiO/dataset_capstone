@@ -291,7 +291,7 @@ For CARLA scenarios — calibration is fully automatic from camera intrinsics + 
 python capstone_sim/scripts/analytics/setup_analytics.py capstone_sim/configs/Town6_1cam.yaml
 ```
 
-This connects to CARLA, spawns the scenario camera, captures one frame, auto-calibrates, then walks through three steps: **(1) calibration**, **(2) lane polygons**, **(3) forbidden lines** (stop lines for red-light violations). Saves to `capstone_sim/analytics_configs/<scenario>.yaml`.
+This connects to CARLA, spawns the scenario camera, captures one frame, auto-calibrates, then walks through four steps: **(1) calibration**, **(2) lane polygons**, **(3) forbidden lines** (stop lines for red-light violations), **(4) highway entry zones** (for entry counting by light state). Saves to `capstone_sim/analytics_configs/<scenario>.yaml`.
 
 For real video / CCTV — calibration is manual (click 4 corners of a known rectangle):
 
@@ -308,6 +308,7 @@ Source can also be a recording directory, webcam (`0`), or RTSP stream URL.
 | `--recalibrate` | Redo calibration |
 | `--redo-lanes` | Wipe existing lanes and define fresh |
 | `--redo-lines` | Wipe existing forbidden lines and define fresh |
+| `--redo-entry-zones` | Wipe existing highway entry zones and define fresh |
 | `--manual` | Force manual calibration |
 
 ### 2. Run live analytics on CARLA
@@ -316,7 +317,7 @@ Source can also be a recording directory, webcam (`0`), or RTSP stream URL.
 python capstone_sim/scripts/analytics/live_analytics.py capstone_sim/configs/Town6_1cam.yaml capstone_sim/models/yolov11m/best.pt
 ```
 
-Spawns traffic from the scenario, runs detection + tracking + speed + per-lane queue counts + red-light violation detection in real time. Reads the traffic light state directly from CARLA. Saves results to `capstone_sim/analytics_runs/<scenario>_<timestamp>/`.
+Spawns traffic from the scenario, runs detection + tracking + speed + per-lane queue counts + red-light violation detection + highway entry counting in real time. Reads the traffic light state directly from CARLA. Saves results to `capstone_sim/analytics_runs/<scenario>_<timestamp>/`.
 
 | Flag | Description |
 |------|-------------|
@@ -346,7 +347,8 @@ Both live and recorded analytics save:
 - `per_track.csv` — Per-frame, per-track: track_id, class, world_x, world_y, speed
 - `per_lane_queue.csv` — Per-frame queue count for each lane
 - `violations.csv` — Each red-light violation: frame, track_id, line_id, light_state
-- `summary.json` — Final stats: avg/max speed, max queue per lane, total violations, unique tracks, FPS
+- `entries.csv` — Each highway entry: frame, track_id, zone_id, light_state
+- `summary.json` — Final stats: avg/max speed, max queue per lane, total violations, entry counts per zone (by light state), unique tracks, FPS
 
 ### Queue thresholds
 
@@ -392,6 +394,6 @@ A vehicle that crosses a forbidden line (defined in setup step 3) while the ligh
 | `analyze_dataset.py` | `scripts/evaluate/` | Class distribution, imbalance warnings |
 | `generate_report.py` | `scripts/evaluate/` | Auto-generated HTML report |
 | `inference.py` | `scripts/evaluate/` | Run model on any MP4/webcam |
-| `setup_analytics.py` | `scripts/analytics/` | Calibration + lane + forbidden-line definition |
-| `traffic_analytics.py` | `scripts/analytics/` | Speed + queue + red-light violations on recorded video |
-| `live_analytics.py` | `scripts/analytics/` | Speed + queue + red-light violations live on CARLA |
+| `setup_analytics.py` | `scripts/analytics/` | Calibration + lane + forbidden-line + entry-zone definition |
+| `traffic_analytics.py` | `scripts/analytics/` | Speed + queue + violations + entry counting on recorded video |
+| `live_analytics.py` | `scripts/analytics/` | Speed + queue + violations + entry counting live on CARLA |

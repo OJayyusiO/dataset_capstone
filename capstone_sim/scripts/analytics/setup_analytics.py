@@ -399,6 +399,66 @@ def define_lanes(frame, existing_lanes=None, skip_first_prompt=False):
     return lanes
 
 
+def define_entry_zones(frame, lanes=None, existing_zones=None, skip_first_prompt=False):
+    """Interactively define highway entry zones as polygons.
+
+    Each unique vehicle that enters a zone is counted once, recorded with the
+    light state at the moment of entry (for ramp-metering / entry-flow analytics).
+
+    Returns list of {'id': str, 'polygon': [[x, y], ...]} dicts.
+    """
+    zones = list(existing_zones or [])
+    lanes = lanes or []
+
+    if zones:
+        print(f"\n{len(zones)} entry zone(s) already defined:")
+        for z in zones:
+            print(f"  - {z['id']}")
+
+    print("\nDefine entry zones by clicking polygon corners around each highway entry / ramp.")
+    print("Vehicles entering the zone are counted, grouped by the light state at entry.")
+
+    first_iter = True
+    while True:
+        if first_iter and skip_first_prompt:
+            choice = 'y'
+        else:
+            prompt = "\nAdd another entry zone? [y/N]: " if zones else "\nAdd an entry zone? [y/N]: "
+            choice = input(prompt).strip().lower()
+            if choice == '':
+                choice = 'n'
+            if choice != 'y':
+                break
+        first_iter = False
+
+        zone_id = input("  Entry zone ID (e.g. ramp_east): ").strip()
+        if not zone_id:
+            print("  Skipped (no ID provided)")
+            continue
+
+        preview = frame.copy()
+        for ln in lanes:
+            pts = np.array(ln['polygon'], dtype=np.int32)
+            cv2.polylines(preview, [pts], isClosed=True, color=(100, 100, 255), thickness=1)
+        for z in zones:
+            pts = np.array(z['polygon'], dtype=np.int32)
+            cv2.polylines(preview, [pts], isClosed=True, color=(0, 200, 255), thickness=2)
+
+        picker = PolygonPicker(preview, window_name=f"Define entry zone: {zone_id}")
+        polygon = picker.pick()
+        if polygon is None:
+            print(f"  Cancelled zone {zone_id}")
+            continue
+
+        zones.append({
+            'id': zone_id,
+            'polygon': [[int(x), int(y)] for (x, y) in polygon],
+        })
+        print(f"  Added {zone_id} with {len(polygon)} corners.")
+
+    return zones
+
+
 def define_forbidden_lines(frame, lanes=None, existing_lines=None, skip_first_prompt=False):
     """Interactively define forbidden lines (e.g. stop lines) as 2-point segments.
 
@@ -739,6 +799,8 @@ def main():
                         help='Wipe existing lanes and start fresh')
     parser.add_argument('--redo-lines', action='store_true',
                         help='Wipe existing forbidden lines and start fresh')
+    parser.add_argument('--redo-entry-zones', action='store_true',
+                        help='Wipe existing highway entry zones and start fresh')
     args = parser.parse_args()
 
     frame, source_dir, source_label = resolve_source(args.source, args.frame)
@@ -895,6 +957,42 @@ def main():
             lines = define_forbidden_lines(frame, lanes=current_lanes, existing_lines=[])
             config['forbidden_lines'] = lines
 
+    # --- Step 4: Highway Entry Zones (for entry counting by light state) ---
+    print("\n" + "=" * 60)
+    print("Step 4: Highway Entry Zones")
+    print("=" * 60)
+
+    existing_zones = config.get('entry_zones', [])
+
+    if args.redo_entry_zones:
+        print(f"  --redo-entry-zones flag set: wiping {len(existing_zones)} existing zone(s).")
+        zones = define_entry_zones(frame, lanes=current_lanes, existing_zones=[], skip_first_prompt=True)
+        config['entry_zones'] = zones
+    elif existing_zones:
+        print(f"  {len(existing_zones)} entry zone(s) already defined:")
+        for z in existing_zones:
+            print(f"    - {z['id']}")
+        print("\nOptions:")
+        print("  [a] Add more zones (keep existing)")
+        print("  [r] Replace all — wipe existing and start fresh")
+        print("  [s] Skip — don't touch zones")
+        while True:
+            choice = input("Choice [a/r/s]: ").strip().lower()
+            if choice in ('a', 'r', 's'):
+                break
+            print("Invalid choice.")
+        if choice == 'r':
+            zones = define_entry_zones(frame, lanes=current_lanes, existing_zones=[], skip_first_prompt=True)
+            config['entry_zones'] = zones
+        elif choice == 'a':
+            zones = define_entry_zones(frame, lanes=current_lanes, existing_zones=existing_zones)
+            config['entry_zones'] = zones
+        # 's' = skip
+    else:
+        if _ask_yes_no("Add highway entry zones (for entry counting)?", default_yes=False):
+            zones = define_entry_zones(frame, lanes=current_lanes, existing_zones=[])
+            config['entry_zones'] = zones
+
     # --- Save ---
     config['source'] = source_label
 
@@ -913,7 +1011,7 @@ def main():
     print(f"  Calibration: {config.get('calibration', {}).get('mode', 'NONE')}")
     print(f"  Lanes: {len(config.get('lanes', []))}")
     print(f"  Forbidden lines: {len(config.get('forbidden_lines', []))}")
-    print("\nNext: highway entry zones (coming soon).")
+    print(f"  Entry zones: {len(config.get('entry_zones', []))}")
 
 
 if __name__ == '__main__':

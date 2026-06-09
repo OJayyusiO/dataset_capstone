@@ -18,7 +18,7 @@ import argparse
 import csv
 import sys
 import time
-from collections import deque
+from collections import deque, defaultdict
 from pathlib import Path
 
 import cv2
@@ -359,6 +359,78 @@ def draw_forbidden_lines(frame, lines, active_violation=False):
 
 
 # --------------------------------------------------------------------------- #
+# Highway entry zones / entry counting
+# --------------------------------------------------------------------------- #
+
+class EntryCounter:
+    """Counts unique vehicles entering each zone, grouped by light state at entry.
+
+    A vehicle is counted once per zone, on the frame it first transitions from
+    outside the zone to inside it. The light state at that moment is recorded —
+    e.g. an entry on red can indicate a ramp-metering violation.
+    """
+
+    def __init__(self, zones):
+        self.zones = zones or []
+        self.inside = {}          # (track_id, zone_id) -> currently inside?
+        self.counted = set()      # (track_id, zone_id) already counted
+        self.counts = {z['id']: {'total': 0, 'by_light': defaultdict(int)} for z in self.zones}
+
+    def check(self, detections, light_state, frame_idx):
+        """Return list of new entries this frame: {track_id, zone_id, frame, light_state}."""
+        new_entries = []
+        for det in detections:
+            tid = det['track_id']
+            p = det['point']
+            for zone in self.zones:
+                key = (tid, zone['id'])
+                now_inside = point_in_polygon(p, zone['polygon'])
+                was_inside = self.inside.get(key, False)
+                self.inside[key] = now_inside
+                if now_inside and not was_inside and key not in self.counted:
+                    self.counted.add(key)
+                    self.counts[zone['id']]['total'] += 1
+                    self.counts[zone['id']]['by_light'][light_state] += 1
+                    new_entries.append({
+                        'track_id': tid, 'zone_id': zone['id'],
+                        'frame': frame_idx, 'light_state': light_state,
+                    })
+        return new_entries
+
+    def summary(self):
+        """Return a JSON-serializable summary of counts per zone."""
+        return {
+            zid: {'total': c['total'], 'by_light': dict(c['by_light'])}
+            for zid, c in self.counts.items()
+        }
+
+
+def draw_entry_zones(frame, zones, entry_counter):
+    """Draw entry zone polygons with running entry counts (total + by light)."""
+    if not zones:
+        return
+    overlay = frame.copy()
+    for zone in zones:
+        poly = np.array(zone['polygon'], dtype=np.int32)
+        cv2.fillPoly(overlay, [poly], (0, 140, 200))
+        cv2.polylines(frame, [poly], isClosed=True, color=(0, 200, 255), thickness=2)
+    cv2.addWeighted(overlay, 0.12, frame, 0.88, 0, frame)
+
+    for zone in zones:
+        poly = np.array(zone['polygon'], dtype=np.int32)
+        centroid = poly.mean(axis=0).astype(int)
+        c = entry_counter.counts.get(zone['id'], {})
+        total = c.get('total', 0)
+        by = c.get('by_light', {})
+        label = f"{zone['id']}: {total} in (G:{by.get('green', 0)} R:{by.get('red', 0)})"
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
+        cv2.rectangle(frame, (centroid[0] - 5, centroid[1] - th - 6),
+                      (centroid[0] + tw + 5, centroid[1] + 6), (0, 120, 180), -1)
+        cv2.putText(frame, label, (centroid[0], centroid[1]),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
+
+
+# --------------------------------------------------------------------------- #
 # Drawing
 # --------------------------------------------------------------------------- #
 
@@ -428,6 +500,10 @@ def run(source_arg, model_path, output_dir, conf, iou, show):
     forbidden_lines = config.get('forbidden_lines', [])
     violation_detector = ViolationDetector(forbidden_lines)
 
+    # Highway entry zones + entry counting
+    entry_zones = config.get('entry_zones', [])
+    entry_counter = EntryCounter(entry_zones)
+
     print("Traffic Analytics — Speed + Queue per lane")
     print("=" * 60)
     print(f"Source:      {source_arg}")
@@ -439,6 +515,7 @@ def run(source_arg, model_path, output_dir, conf, iou, show):
     print(f"Queue:       slower than {queue_speed_kmh:.1f} km/h for {queue_min_seconds:.1f}+ sec")
     print(f"Light state: {'available (' + light_provider.mode + ')' if light_provider.available else 'none'}")
     print(f"Forbidden lines: {len(forbidden_lines)}")
+    print(f"Entry zones: {len(entry_zones)}")
     print(f"Output:      {output_dir.resolve()}")
     print("=" * 60)
 
@@ -475,10 +552,20 @@ def run(source_arg, model_path, output_dir, conf, iou, show):
         violation_csv_writer = csv.writer(violation_csv_file)
         violation_csv_writer.writerow(['frame', 'track_id', 'line_id', 'light_state'])
 
+    # CSV log of entry-zone entries
+    entry_csv_file = None
+    entry_csv_writer = None
+    if entry_zones:
+        entry_csv_path = output_dir / 'entries.csv'
+        entry_csv_file = open(entry_csv_path, 'w', newline='')
+        entry_csv_writer = csv.writer(entry_csv_file)
+        entry_csv_writer.writerow(['frame', 'track_id', 'zone_id', 'light_state'])
+
     frame_idx = 0
     start_time = time.time()
     track_ids_seen = set()
     total_violations = 0
+    total_entries = 0
 
     try:
         for frame in frame_iter:
@@ -545,6 +632,15 @@ def run(source_arg, model_path, output_dir, conf, iou, show):
                     print(f"  VIOLATION: track #{v['track_id']} crossed {v['line_id']} on red (frame {frame_idx})")
                 draw_forbidden_lines(frame, forbidden_lines, active_violation=bool(violations_now))
 
+            # Highway entry counting
+            if entry_zones:
+                entries_now = entry_counter.check(frame_detections, light_state, frame_idx)
+                for e in entries_now:
+                    total_entries += 1
+                    if entry_csv_writer:
+                        entry_csv_writer.writerow([e['frame'], e['track_id'], e['zone_id'], e['light_state']])
+                draw_entry_zones(frame, entry_zones, entry_counter)
+
             # Traffic light indicator
             if light_provider.available:
                 draw_light_indicator(frame, light_state)
@@ -562,6 +658,8 @@ def run(source_arg, model_path, output_dir, conf, iou, show):
             elapsed = time.time() - start_time
             inference_fps = (frame_idx + 1) / max(elapsed, 0.001)
             hud = f"Frame {frame_idx}  |  {inference_fps:.1f} FPS  |  Tracks: {len(track_ids_seen)}  |  Violations: {total_violations}"
+            if entry_zones:
+                hud += f"  |  Entries: {total_entries}"
             cv2.putText(frame, hud, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
                         (255, 255, 255), 2)
 
@@ -585,6 +683,8 @@ def run(source_arg, model_path, output_dir, conf, iou, show):
             queue_csv_file.close()
         if violation_csv_file:
             violation_csv_file.close()
+        if entry_csv_file:
+            entry_csv_file.close()
         if show:
             cv2.destroyAllWindows()
 
@@ -593,6 +693,8 @@ def run(source_arg, model_path, output_dir, conf, iou, show):
     print(f"  Unique tracks: {len(track_ids_seen)}")
     if forbidden_lines:
         print(f"  Red-light violations: {total_violations}")
+    if entry_zones:
+        print(f"  Entry counts: {entry_counter.summary()}")
     print(f"  Video:        {output_video.resolve()}")
     print(f"  Per-track CSV: {csv_path.resolve()}")
 

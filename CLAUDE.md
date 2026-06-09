@@ -100,13 +100,13 @@ capstone_sim/
 | Forbidden-line picker (`setup_analytics.py` Step 3, `--redo-lines`) | ✅ |
 | Red-light violation detection (`ViolationDetector`, logs to violations.csv) | ✅ |
 | `k` toggle in live_analytics to make vehicles run reds for demos | ✅ |
+| Highway entry counting (`EntryCounter`, entry zones, grouped by light state, logs to entries.csv) | ✅ |
 
 ## What's NOT done (next priorities)
 
-1. **Highway entry traffic light counting** — needs entry zones + light state. Light state is already plumbed (`LightStateProvider`); just need entry-zone definition + counting logic grouped by light state.
-2. **Collision detection** (stretch goal) — bbox overlap + speed drop; tunable, may be skipped
+1. **Collision detection** (stretch goal) — bbox overlap + sudden speed drop; tunable, may be skipped. This is the only remaining originally-scoped feature; all detection/tracking/analytics deliverables are complete.
 
-Light state plumbing and the 2-point line picker are DONE (V3.0). Highway entry counting reuses both — define entry-zone polygons (like lanes) and count vehicles entering them grouped by `LightStateProvider.state_at()`.
+All originally-scoped analytics features are done (speed, queue, red-light violations, highway entry counting). Collision detection is the lone stretch goal left.
 
 ## Reports and presentations
 
