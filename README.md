@@ -323,6 +323,7 @@ Spawns traffic from the scenario, runs detection + tracking + speed + per-lane q
 |------|-------------|
 | `--save-video` | Save the annotated feed as MP4 |
 | `--no-spawn` | Skip spawning vehicles (use if CARLA already has traffic) |
+| `--collisions` | Enable experimental collision detection |
 | `--conf` / `--iou` | Detection thresholds |
 
 **Live keyboard controls:**
@@ -348,7 +349,8 @@ Both live and recorded analytics save:
 - `per_lane_queue.csv` — Per-frame queue count for each lane
 - `violations.csv` — Each red-light violation: frame, track_id, line_id, light_state
 - `entries.csv` — Each highway entry: frame, track_id, zone_id, light_state
-- `summary.json` — Final stats: avg/max speed, max queue per lane, total violations, entry counts per zone (by light state), unique tracks, FPS
+- `collisions.csv` — Each detected collision (with `--collisions`): frame, track_a, track_b, world_dist_m
+- `summary.json` — Final stats: avg/max speed, max queue per lane, total violations, entry counts per zone (by light state), collisions, unique tracks, FPS
 
 ### Queue thresholds
 
@@ -371,6 +373,20 @@ light_schedule:
 ```
 
 A vehicle that crosses a forbidden line (defined in setup step 3) while the light is red is logged as a violation. For CARLA recordings, `record_test.py` auto-logs per-frame light state to `light_states.csv`.
+
+### Collision detection (experimental)
+
+Opt-in with `--collisions`. A collision is flagged when two tracked vehicles **(1)** have overlapping bounding boxes, **(2)** are within a few meters in world space (rules out perspective overlaps of vehicles actually far apart), and **(3)** at least one shows a sudden speed drop. Tunable in `analytics_config.yaml`:
+
+```yaml
+collision:
+  iou_threshold: 0.10        # bbox overlap to consider "touching"
+  speed_drop_kmh: 15.0       # sudden deceleration suggesting impact
+  world_distance_m: 6.0      # ground-plane proximity (cuts perspective false positives)
+  window_seconds: 0.6        # window over which the speed drop is measured
+```
+
+This is a heuristic, not ground truth — thresholds may need tuning per scenario.
 
 ---
 
@@ -395,5 +411,5 @@ A vehicle that crosses a forbidden line (defined in setup step 3) while the ligh
 | `generate_report.py` | `scripts/evaluate/` | Auto-generated HTML report |
 | `inference.py` | `scripts/evaluate/` | Run model on any MP4/webcam |
 | `setup_analytics.py` | `scripts/analytics/` | Calibration + lane + forbidden-line + entry-zone definition |
-| `traffic_analytics.py` | `scripts/analytics/` | Speed + queue + violations + entry counting on recorded video |
-| `live_analytics.py` | `scripts/analytics/` | Speed + queue + violations + entry counting live on CARLA |
+| `traffic_analytics.py` | `scripts/analytics/` | Speed + queue + violations + entry counting + collisions on recorded video |
+| `live_analytics.py` | `scripts/analytics/` | Speed + queue + violations + entry counting + collisions live on CARLA |

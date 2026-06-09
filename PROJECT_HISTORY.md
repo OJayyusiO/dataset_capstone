@@ -780,6 +780,29 @@ This completes all of the originally-scoped analytics features. Remaining: colli
 
 ---
 
+## Phase 13: Collision Detection (stretch goal) — V3.0 (June 2026)
+
+> *The final stretch-goal feature. Heuristic, opt-in, and designed to resist the perspective false positives that plague camera-only collision detection.*
+
+### Why
+Camera-only collision detection is hard: perspective makes vehicles that are far apart in 3D appear to overlap in 2D, so naive bbox-overlap detection produces many false positives. The team treated this as an experimental stretch goal — useful if it works, acceptable to ship as opt-in.
+
+### Implementation
+`CollisionDetector` (in `traffic_analytics.py`, used by both analytics scripts) flags a pair of vehicles only when **all three** signals agree:
+1. **Bbox overlap** — IoU ≥ threshold (they visually touch)
+2. **World-space proximity** — ground-plane distance (via homography) within a few meters; this is the key guard against perspective false positives
+3. **Sudden speed drop** — at least one vehicle decelerates sharply within a short window (a real impact causes abrupt deceleration)
+
+Each unordered pair is flagged once. Opt-in via `--collisions`; thresholds tunable under `collision:` in the config. Logs `collisions.csv` (frame, track_a, track_b, world_dist_m); count in `summary.json` + HUD; involved vehicles drawn with red boxes + "COLLISION" marker.
+
+### Key Design Decision
+Using **world distance as a hard gate** (not just bbox IoU) is what makes this usable. Unit testing confirmed the guard: two boxes that overlap in the image but are 50m apart in world space are correctly ignored, while a genuine overlap + proximity + speed-drop is flagged.
+
+### Status
+All originally-scoped features plus the collision stretch goal are now complete. V3.0 delivers the full analytics suite: speed, per-lane queue, red-light violations, highway entry counting, and (experimental) collision detection.
+
+---
+
 ## Final Test Results
 
 Tested final model on `town02_test` recording (4,979 frames):
@@ -923,3 +946,4 @@ dataset_capstone/
 | **2026-05-12** | Traffic analytics system: calibration, speed per car, per-lane queue length, live + recorded modes, V3.0 | dataset_capstone |
 | **2026-06-09** | Light state plumbing, forbidden-line picker, red-light violation detection, `k` demo toggle | dataset_capstone |
 | **2026-06-09** | Highway entry zones + entry counting grouped by light state | dataset_capstone |
+| **2026-06-09** | Collision detection (experimental, opt-in) — completes the analytics suite | dataset_capstone |

@@ -431,6 +431,108 @@ def draw_entry_zones(frame, zones, entry_counter):
 
 
 # --------------------------------------------------------------------------- #
+# Collision detection (experimental / opt-in)
+# --------------------------------------------------------------------------- #
+
+# Defaults (overridable in analytics_config.yaml under `collision:`)
+DEFAULT_COLLISION_IOU = 0.10            # bbox overlap fraction to consider "touching"
+DEFAULT_COLLISION_SPEED_DROP_KMH = 15.0  # sudden deceleration that suggests impact
+DEFAULT_COLLISION_WORLD_DIST_M = 6.0    # ground-plane proximity (cuts perspective FPs)
+DEFAULT_COLLISION_WINDOW_SECONDS = 0.6  # window over which the speed drop is measured
+
+
+def _bbox_iou(a, b):
+    """IoU of two [x1, y1, x2, y2] boxes."""
+    x1 = max(a[0], b[0]); y1 = max(a[1], b[1])
+    x2 = min(a[2], b[2]); y2 = min(a[3], b[3])
+    inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    area_a = max(0.0, a[2] - a[0]) * max(0.0, a[3] - a[1])
+    area_b = max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
+class CollisionDetector:
+    """Heuristic collision detector from tracking output.
+
+    Flags a pair of vehicles as a likely collision when ALL hold:
+      1. their bounding boxes overlap (IoU >= iou_threshold) — they visually touch
+      2. their ground-plane positions are within world_dist_m — rules out
+         perspective overlaps of vehicles that are actually far apart in 3D
+      3. at least one of them shows a sudden speed drop >= speed_drop within the
+         recent window — a real impact causes abrupt deceleration
+
+    Each unordered pair is flagged once. This is a heuristic, not ground truth;
+    thresholds are tunable and the feature is opt-in.
+    """
+
+    def __init__(self, iou_threshold, speed_drop_kmh, world_dist_m, window_seconds, fps):
+        self.iou_threshold = iou_threshold
+        self.speed_drop_mps = speed_drop_kmh / 3.6
+        self.world_dist_m = world_dist_m
+        self.window = max(1, int(round(window_seconds * fps)))
+        self.speed_hist = {}      # track_id -> deque of recent speeds (m/s)
+        self.flagged = set()      # frozenset({a, b}) already flagged
+
+    def _sudden_drop(self, track_id, speed_mps):
+        hist = self.speed_hist.setdefault(track_id, deque(maxlen=self.window))
+        recent_max = max(hist) if hist else speed_mps
+        hist.append(speed_mps)
+        return (recent_max - speed_mps) >= self.speed_drop_mps
+
+    def check(self, detections, frame_idx):
+        """detections: list of {track_id, bbox, world, speed_mps}. Returns new collisions."""
+        # Update per-track speed-drop flags first
+        dropped = {}
+        for d in detections:
+            dropped[d['track_id']] = self._sudden_drop(d['track_id'], d['speed_mps'])
+
+        new_collisions = []
+        n = len(detections)
+        for i in range(n):
+            for j in range(i + 1, n):
+                da, db = detections[i], detections[j]
+                pair = frozenset((da['track_id'], db['track_id']))
+                if pair in self.flagged:
+                    continue
+                if _bbox_iou(da['bbox'], db['bbox']) < self.iou_threshold:
+                    continue
+                wa, wb = da['world'], db['world']
+                if wa is None or wb is None:
+                    continue
+                dist = ((wa[0] - wb[0]) ** 2 + (wa[1] - wb[1]) ** 2) ** 0.5
+                if dist > self.world_dist_m:
+                    continue
+                if not (dropped.get(da['track_id']) or dropped.get(db['track_id'])):
+                    continue
+                self.flagged.add(pair)
+                new_collisions.append({
+                    'frame': frame_idx,
+                    'track_a': da['track_id'],
+                    'track_b': db['track_id'],
+                    'world_dist_m': round(dist, 2),
+                })
+        return new_collisions
+
+
+def draw_collisions(frame, detections, collision_pairs):
+    """Highlight vehicles involved in a collision this frame (red boxes + marker)."""
+    if not collision_pairs:
+        return
+    involved = set()
+    for c in collision_pairs:
+        involved.add(c['track_a'])
+        involved.add(c['track_b'])
+    for d in detections:
+        if d['track_id'] in involved:
+            x1, y1, x2, y2 = [int(v) for v in d['bbox']]
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 4)
+            cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+            cv2.putText(frame, "COLLISION", (x1, y2 + 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+
+
+# --------------------------------------------------------------------------- #
 # Drawing
 # --------------------------------------------------------------------------- #
 
@@ -471,7 +573,7 @@ def draw_detection(frame, bbox, class_id, track_id, conf, speed_kmh):
 # Main pipeline
 # --------------------------------------------------------------------------- #
 
-def run(source_arg, model_path, output_dir, conf, iou, show):
+def run(source_arg, model_path, output_dir, conf, iou, show, detect_collisions=False):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -504,6 +606,18 @@ def run(source_arg, model_path, output_dir, conf, iou, show):
     entry_zones = config.get('entry_zones', [])
     entry_counter = EntryCounter(entry_zones)
 
+    # Collision detection (opt-in via --collisions; thresholds from `collision:` config)
+    collision_detector = None
+    if detect_collisions:
+        cc = config.get('collision', {})
+        collision_detector = CollisionDetector(
+            iou_threshold=cc.get('iou_threshold', DEFAULT_COLLISION_IOU),
+            speed_drop_kmh=cc.get('speed_drop_kmh', DEFAULT_COLLISION_SPEED_DROP_KMH),
+            world_dist_m=cc.get('world_distance_m', DEFAULT_COLLISION_WORLD_DIST_M),
+            window_seconds=cc.get('window_seconds', DEFAULT_COLLISION_WINDOW_SECONDS),
+            fps=fps,
+        )
+
     print("Traffic Analytics — Speed + Queue per lane")
     print("=" * 60)
     print(f"Source:      {source_arg}")
@@ -516,6 +630,7 @@ def run(source_arg, model_path, output_dir, conf, iou, show):
     print(f"Light state: {'available (' + light_provider.mode + ')' if light_provider.available else 'none'}")
     print(f"Forbidden lines: {len(forbidden_lines)}")
     print(f"Entry zones: {len(entry_zones)}")
+    print(f"Collision detection: {'ON' if collision_detector else 'off'}")
     print(f"Output:      {output_dir.resolve()}")
     print("=" * 60)
 
@@ -561,11 +676,21 @@ def run(source_arg, model_path, output_dir, conf, iou, show):
         entry_csv_writer = csv.writer(entry_csv_file)
         entry_csv_writer.writerow(['frame', 'track_id', 'zone_id', 'light_state'])
 
+    # CSV log of collisions
+    collision_csv_file = None
+    collision_csv_writer = None
+    if collision_detector:
+        collision_csv_path = output_dir / 'collisions.csv'
+        collision_csv_file = open(collision_csv_path, 'w', newline='')
+        collision_csv_writer = csv.writer(collision_csv_file)
+        collision_csv_writer.writerow(['frame', 'track_a', 'track_b', 'world_dist_m'])
+
     frame_idx = 0
     start_time = time.time()
     track_ids_seen = set()
     total_violations = 0
     total_entries = 0
+    total_collisions = 0
 
     try:
         for frame in frame_iter:
@@ -593,15 +718,17 @@ def run(source_arg, model_path, output_dir, conf, iou, show):
                     speed_kmh = speed_mps * 3.6
 
                     ref_x, ref_y = vehicle_ground_point(xyxy)
+                    world = pixel_to_world(H, ref_x, ref_y) or (0, 0)
                     frame_detections.append({
                         'point': (ref_x, ref_y),
                         'speed_mps': speed_mps,
                         'track_id': track_id,
+                        'bbox': [float(v) for v in xyxy],
+                        'world': world,
                     })
 
                     draw_detection(frame, xyxy, cls, track_id, conf_score, speed_kmh)
 
-                    world = pixel_to_world(H, ref_x, ref_y) or (0, 0)
                     csv_writer.writerow([
                         frame_idx, track_id, CLASS_NAMES.get(cls, cls),
                         round(world[0], 3), round(world[1], 3),
@@ -641,6 +768,18 @@ def run(source_arg, model_path, output_dir, conf, iou, show):
                         entry_csv_writer.writerow([e['frame'], e['track_id'], e['zone_id'], e['light_state']])
                 draw_entry_zones(frame, entry_zones, entry_counter)
 
+            # Collision detection (experimental)
+            collisions_now = []
+            if collision_detector:
+                collisions_now = collision_detector.check(frame_detections, frame_idx)
+                for c in collisions_now:
+                    total_collisions += 1
+                    if collision_csv_writer:
+                        collision_csv_writer.writerow([c['frame'], c['track_a'], c['track_b'], c['world_dist_m']])
+                    print(f"  COLLISION: tracks #{c['track_a']} & #{c['track_b']} "
+                          f"({c['world_dist_m']}m apart, frame {frame_idx})")
+                draw_collisions(frame, frame_detections, collisions_now)
+
             # Traffic light indicator
             if light_provider.available:
                 draw_light_indicator(frame, light_state)
@@ -660,6 +799,8 @@ def run(source_arg, model_path, output_dir, conf, iou, show):
             hud = f"Frame {frame_idx}  |  {inference_fps:.1f} FPS  |  Tracks: {len(track_ids_seen)}  |  Violations: {total_violations}"
             if entry_zones:
                 hud += f"  |  Entries: {total_entries}"
+            if collision_detector:
+                hud += f"  |  Collisions: {total_collisions}"
             cv2.putText(frame, hud, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
                         (255, 255, 255), 2)
 
@@ -685,6 +826,8 @@ def run(source_arg, model_path, output_dir, conf, iou, show):
             violation_csv_file.close()
         if entry_csv_file:
             entry_csv_file.close()
+        if collision_csv_file:
+            collision_csv_file.close()
         if show:
             cv2.destroyAllWindows()
 
@@ -695,6 +838,8 @@ def run(source_arg, model_path, output_dir, conf, iou, show):
         print(f"  Red-light violations: {total_violations}")
     if entry_zones:
         print(f"  Entry counts: {entry_counter.summary()}")
+    if collision_detector:
+        print(f"  Collisions detected: {total_collisions}")
     print(f"  Video:        {output_video.resolve()}")
     print(f"  Per-track CSV: {csv_path.resolve()}")
 
@@ -708,6 +853,8 @@ def main():
     parser.add_argument('--conf', type=float, default=0.25)
     parser.add_argument('--iou', type=float, default=0.5)
     parser.add_argument('--show', action='store_true', help='Show live preview window')
+    parser.add_argument('--collisions', action='store_true',
+                        help='Enable experimental collision detection (bbox overlap + world proximity + speed drop)')
     args = parser.parse_args()
 
     if not Path(args.model).exists():
@@ -724,7 +871,7 @@ def main():
     else:
         output_dir = args.output
 
-    run(args.source, args.model, output_dir, args.conf, args.iou, args.show)
+    run(args.source, args.model, output_dir, args.conf, args.iou, args.show, args.collisions)
 
 
 if __name__ == '__main__':

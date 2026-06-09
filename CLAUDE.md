@@ -101,12 +101,13 @@ capstone_sim/
 | Red-light violation detection (`ViolationDetector`, logs to violations.csv) | ✅ |
 | `k` toggle in live_analytics to make vehicles run reds for demos | ✅ |
 | Highway entry counting (`EntryCounter`, entry zones, grouped by light state, logs to entries.csv) | ✅ |
+| Collision detection (`CollisionDetector`, opt-in `--collisions`, bbox IoU + world proximity + speed drop, logs collisions.csv) | ✅ |
 
-## What's NOT done (next priorities)
+## What's NOT done
 
-1. **Collision detection** (stretch goal) — bbox overlap + sudden speed drop; tunable, may be skipped. This is the only remaining originally-scoped feature; all detection/tracking/analytics deliverables are complete.
+All originally-scoped features AND the collision-detection stretch goal are complete. The full analytics suite (speed, per-lane queue, red-light violations, highway entry counting, collision detection) is implemented in both live and recorded modes.
 
-All originally-scoped analytics features are done (speed, queue, red-light violations, highway entry counting). Collision detection is the lone stretch goal left.
+Possible future polish (none requested): multi-camera analytics fusion, real-world deployment hardening, tuning collision thresholds per scenario.
 
 ## Reports and presentations
 

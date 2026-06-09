@@ -46,7 +46,10 @@ from capstone_sim.scripts.analytics.traffic_analytics import (
     compute_queue_counts, draw_lanes_overlay,
     vehicle_ground_point, ViolationDetector, draw_forbidden_lines,
     EntryCounter, draw_entry_zones,
+    CollisionDetector, draw_collisions,
     DEFAULT_QUEUE_SPEED_KMH, DEFAULT_QUEUE_MIN_STATIONARY_SECONDS,
+    DEFAULT_COLLISION_IOU, DEFAULT_COLLISION_SPEED_DROP_KMH,
+    DEFAULT_COLLISION_WORLD_DIST_M, DEFAULT_COLLISION_WINDOW_SECONDS,
 )
 
 try:
@@ -88,7 +91,7 @@ def build_calibration_from_scenario(scenario_config, camera_index=0):
 
 
 def run(scenario_path, model_path, save_video, spawn_traffic, conf, iou,
-        analytics_config_path, output_dir):
+        analytics_config_path, output_dir, detect_collisions=False):
     scenario_path = Path(scenario_path)
     with open(scenario_path) as f:
         scenario = yaml.safe_load(f)
@@ -113,6 +116,7 @@ def run(scenario_path, model_path, save_video, spawn_traffic, conf, iou,
     queue_cfg = {}
     forbidden_lines = []
     entry_zones = []
+    collision_cfg = {}
     if analytics_config_path:
         with open(analytics_config_path) as f:
             ac = yaml.safe_load(f)
@@ -120,6 +124,7 @@ def run(scenario_path, model_path, save_video, spawn_traffic, conf, iou,
         queue_cfg = ac.get('queue', {})
         forbidden_lines = ac.get('forbidden_lines', [])
         entry_zones = ac.get('entry_zones', [])
+        collision_cfg = ac.get('collision', {})
         if 'calibration' in ac:
             calibration = ac['calibration']
             print(f"Using calibration + {len(lanes)} lane(s) from {analytics_config_path}")
@@ -140,6 +145,7 @@ def run(scenario_path, model_path, save_video, spawn_traffic, conf, iou,
     queue_min_seconds = queue_cfg.get('min_stationary_seconds', DEFAULT_QUEUE_MIN_STATIONARY_SECONDS)
     violation_detector = ViolationDetector(forbidden_lines)
     entry_counter = EntryCounter(entry_zones)
+    collision_detector = None  # built after fps is known
 
     # Camera params (use first camera)
     if 'cameras' in scenario:
@@ -152,6 +158,14 @@ def run(scenario_path, model_path, save_video, spawn_traffic, conf, iou,
 
     # Now that we know fps, build the queue tracker
     queue_tracker = QueueTracker(queue_speed_kmh, queue_min_seconds, fps)
+    if detect_collisions:
+        collision_detector = CollisionDetector(
+            iou_threshold=collision_cfg.get('iou_threshold', DEFAULT_COLLISION_IOU),
+            speed_drop_kmh=collision_cfg.get('speed_drop_kmh', DEFAULT_COLLISION_SPEED_DROP_KMH),
+            world_dist_m=collision_cfg.get('world_distance_m', DEFAULT_COLLISION_WORLD_DIST_M),
+            window_seconds=collision_cfg.get('window_seconds', DEFAULT_COLLISION_WINDOW_SECONDS),
+            fps=fps,
+        )
 
     print("=" * 60)
     print("Live Traffic Analytics on CARLA")
@@ -269,11 +283,20 @@ def run(scenario_path, model_path, save_video, spawn_traffic, conf, iou,
             entry_csv_writer = csv.writer(entry_csv_file)
             entry_csv_writer.writerow(['frame', 'track_id', 'zone_id', 'light_state'])
 
+        collision_csv_file = None
+        collision_csv_writer = None
+        if collision_detector:
+            collision_csv_path = output_dir / 'collisions.csv'
+            collision_csv_file = open(collision_csv_path, 'w', newline='')
+            collision_csv_writer = csv.writer(collision_csv_file)
+            collision_csv_writer.writerow(['frame', 'track_a', 'track_b', 'world_dist_m'])
+
         # Stats trackers for summary
         max_queue_per_lane = defaultdict(int)
         speed_samples = []  # all per-detection speeds in m/s
         total_violations = 0
         total_entries = 0
+        total_collisions = 0
 
         # Set up spawn lifecycle from scenario YAML (matches record_test.py)
         spawn_config = scenario.get('spawn', {})
@@ -459,15 +482,17 @@ def run(scenario_path, model_path, save_video, spawn_traffic, conf, iou,
                     track_ids_seen.add(track_id)
                     speed_mps = speed_tracker.update(frame_idx, track_id, xyxy)
                     ref_x, ref_y = vehicle_ground_point(xyxy)
+                    world_pos = pixel_to_world(H, ref_x, ref_y) or (0, 0)
                     frame_detections.append({
                         'point': (ref_x, ref_y),
                         'speed_mps': speed_mps,
                         'track_id': track_id,
+                        'bbox': [float(v) for v in xyxy],
+                        'world': world_pos,
                     })
                     draw_detection(frame, xyxy, cls, track_id, conf_score, speed_mps * 3.6)
 
                     # Log per-track CSV row
-                    world_pos = pixel_to_world(H, ref_x, ref_y) or (0, 0)
                     csv_writer.writerow([
                         frame_idx, track_id, CLASS_NAMES.get(cls, cls),
                         round(world_pos[0], 3), round(world_pos[1], 3),
@@ -511,6 +536,18 @@ def run(scenario_path, model_path, save_video, spawn_traffic, conf, iou,
                         entry_csv_writer.writerow([e['frame'], e['track_id'], e['zone_id'], e['light_state']])
                 draw_entry_zones(frame, entry_zones, entry_counter)
 
+            # Collision detection (experimental)
+            collisions_now = []
+            if collision_detector:
+                collisions_now = collision_detector.check(frame_detections, frame_idx)
+                for c in collisions_now:
+                    total_collisions += 1
+                    if collision_csv_writer:
+                        collision_csv_writer.writerow([c['frame'], c['track_a'], c['track_b'], c['world_dist_m']])
+                    print(f"  COLLISION: tracks #{c['track_a']} & #{c['track_b']} "
+                          f"({c['world_dist_m']}m apart, frame {frame_idx})")
+                draw_collisions(frame, frame_detections, collisions_now)
+
             # Traffic light indicator
             if light_provider.available:
                 draw_light_indicator(frame, light_state)
@@ -529,6 +566,8 @@ def run(scenario_path, model_path, save_video, spawn_traffic, conf, iou,
             hud = f"Frame {frame_idx}  |  {real_fps:.1f} FPS  |  Tracks: {len(track_ids_seen)}  |  Violations: {total_violations}"
             if entry_zones:
                 hud += f"  |  Entries: {total_entries}"
+            if collision_detector:
+                hud += f"  |  Collisions: {total_collisions}"
             cv2.putText(frame, hud, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
                         (255, 255, 255), 2)
 
@@ -567,6 +606,8 @@ def run(scenario_path, model_path, save_video, spawn_traffic, conf, iou,
             violation_csv_file.close()
         if entry_csv_file:
             entry_csv_file.close()
+        if collision_csv_file:
+            collision_csv_file.close()
 
         # Write summary JSON BEFORE the CARLA cleanup (which can throw if the
         # simulator state changed), so the run summary is always saved.
@@ -588,6 +629,7 @@ def run(scenario_path, model_path, save_video, spawn_traffic, conf, iou,
                 'max_queue_per_lane': dict(max_queue_per_lane),
                 'total_red_light_violations': total_violations,
                 'entry_counts': entry_counter.summary(),
+                'total_collisions': total_collisions,
                 'calibration_mode': calibration.get('mode'),
                 'num_lanes': len(lanes),
                 'num_forbidden_lines': len(forbidden_lines),
@@ -605,6 +647,8 @@ def run(scenario_path, model_path, save_video, spawn_traffic, conf, iou,
                 print(f"  Red-light violations: {total_violations}")
             if entry_zones:
                 print(f"  Entry counts: {entry_counter.summary()}")
+            if collision_detector:
+                print(f"  Collisions detected: {total_collisions}")
             print(f"\nResults saved to: {output_dir.resolve()}")
         except Exception as e:
             print(f"  Warning: could not write summary.json: {e}")
@@ -635,6 +679,8 @@ def main():
                         help='Path to analytics_config.yaml with predefined lanes')
     parser.add_argument('--output', type=str, default=None,
                         help='Output directory (default: capstone_sim/analytics_runs/<scenario>_<timestamp>/)')
+    parser.add_argument('--collisions', action='store_true',
+                        help='Enable experimental collision detection (bbox overlap + world proximity + speed drop)')
     args = parser.parse_args()
 
     if not Path(args.scenario).exists():
@@ -649,7 +695,7 @@ def main():
 
     spawn_traffic = not args.no_spawn
     run(args.scenario, args.model, args.save_video, spawn_traffic,
-        args.conf, args.iou, args.config, args.output)
+        args.conf, args.iou, args.config, args.output, args.collisions)
 
 
 if __name__ == '__main__':
