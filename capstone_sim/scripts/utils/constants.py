@@ -26,7 +26,6 @@ BLUEPRINT_TO_CLASS = {
     'vehicle.jeep.wrangler_rubicon': 0,
     'vehicle.lincoln.mkz_2017': 0,
     'vehicle.mercedes.coupe': 0,
-    'vehicle.micro.microlino': 0,
     'vehicle.mini.cooper_s': 0,
     'vehicle.nissan.micra': 0,
     'vehicle.nissan.patrol': 0,

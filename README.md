@@ -279,15 +279,137 @@ python capstone_sim/scripts/evaluate/evaluate_model.py test_recordings/my_test m
 
 ---
 
+## Traffic Analytics (live + recorded)
+
+Beyond detection metrics, the system can compute **real-world traffic metrics** like per-vehicle speed and per-lane queue length, using camera calibration to convert pixels to world meters.
+
+### 1. Setup analytics (once per scenario / video)
+
+For CARLA scenarios — calibration is fully automatic from camera intrinsics + extrinsics. You only need to define lanes:
+
+```bash
+python capstone_sim/scripts/analytics/setup_analytics.py capstone_sim/configs/Town6_1cam.yaml
+```
+
+This connects to CARLA, spawns the scenario camera, captures one frame, auto-calibrates, then walks through four steps: **(1) calibration**, **(2) lane polygons**, **(3) forbidden lines** (stop lines for red-light violations), **(4) highway entry zones** (for entry counting by light state). Saves to `capstone_sim/analytics_configs/<scenario>.yaml`.
+
+For real video / CCTV — calibration is manual (click 4 corners of a known rectangle):
+
+```bash
+python capstone_sim/scripts/analytics/setup_analytics.py path/to/video.mp4
+```
+
+Source can also be a recording directory, webcam (`0`), or RTSP stream URL.
+
+**Useful flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--recalibrate` | Redo calibration |
+| `--redo-lanes` | Wipe existing lanes and define fresh |
+| `--redo-lines` | Wipe existing forbidden lines and define fresh |
+| `--redo-entry-zones` | Wipe existing highway entry zones and define fresh |
+| `--manual` | Force manual calibration |
+
+### 2. Run live analytics on CARLA
+
+```bash
+python capstone_sim/scripts/analytics/live_analytics.py capstone_sim/configs/Town6_1cam.yaml capstone_sim/models/yolov11m/best.pt
+```
+
+Spawns traffic from the scenario, runs detection + tracking + speed + per-lane queue counts + red-light violation detection + highway entry counting in real time. Reads the traffic light state directly from CARLA. Saves results to `capstone_sim/analytics_runs/<scenario>_<timestamp>/`.
+
+| Flag | Description |
+|------|-------------|
+| `--save-video` | Save the annotated feed as MP4 |
+| `--no-spawn` | Skip spawning vehicles (use if CARLA already has traffic) |
+| `--collisions` | Enable experimental collision detection |
+| `--conf` / `--iou` | Detection thresholds |
+
+**Live keyboard controls:**
+
+| Key | Action |
+|-----|--------|
+| `k` | Toggle all vehicles ignoring red lights (for demoing violations — CARLA vehicles obey lights by default) |
+| `q` | Quit |
+
+### 3. Run analytics on a recorded video
+
+```bash
+python capstone_sim/scripts/analytics/traffic_analytics.py test_recordings/<recording_dir> capstone_sim/models/yolov11m/best.pt
+```
+
+Same outputs as live mode, but on recorded footage.
+
+### Outputs
+
+Both live and recorded analytics save:
+- `live_analytics.mp4` / `analytics.mp4` — Annotated video with speed labels, per-lane queue overlays, light indicator, and violation banners
+- `per_track.csv` — Per-frame, per-track: track_id, class, world_x, world_y, speed
+- `per_lane_queue.csv` — Per-frame queue count for each lane
+- `violations.csv` — Each red-light violation: frame, track_id, line_id, light_state
+- `entries.csv` — Each highway entry: frame, track_id, zone_id, light_state
+- `collisions.csv` — Each detected collision (with `--collisions`): frame, track_a, track_b, world_dist_m
+- `summary.json` — Final stats: avg/max speed, max queue per lane, total violations, entry counts per zone (by light state), collisions, unique tracks, FPS
+
+### Queue thresholds
+
+Configurable in `analytics_config.yaml`:
+
+```yaml
+queue:
+  speed_threshold_kmh: 7.2          # below this = "slow"
+  min_stationary_seconds: 2.0        # must be slow for this long to count as queued
+```
+
+### Traffic light state & red-light violations
+
+Light state is read directly from CARLA (live + recorded). For real video, define a manual schedule in `analytics_config.yaml`:
+
+```yaml
+light_schedule:
+  - {frame: 0, state: red}
+  - {frame: 150, state: green}
+```
+
+A vehicle that crosses a forbidden line (defined in setup step 3) while the light is red is logged as a violation. For CARLA recordings, `record_test.py` auto-logs per-frame light state to `light_states.csv`.
+
+### Collision detection (experimental)
+
+Opt-in with `--collisions`. A collision is flagged when two tracked vehicles **(1)** have overlapping bounding boxes, **(2)** are within a few meters in world space (rules out perspective overlaps of vehicles actually far apart), and **(3)** at least one shows a sudden speed drop. Tunable in `analytics_config.yaml`:
+
+```yaml
+collision:
+  iou_threshold: 0.10        # bbox overlap to consider "touching"
+  speed_drop_kmh: 15.0       # sudden deceleration suggesting impact
+  world_distance_m: 6.0      # ground-plane proximity (cuts perspective false positives)
+  window_seconds: 0.6        # window over which the speed drop is measured
+```
+
+This is a heuristic, not ground truth — thresholds may need tuning per scenario.
+
+---
+
 ## Scripts Reference
 
 | Script | Location | Purpose |
 |--------|----------|---------|
 | `switch_map.py` | `scripts/utils/` | Load a CARLA map by name |
 | `visualize_spawns.py` | `scripts/utils/` | Draw numbered spawn point markers in CARLA |
+| `visualize_traffic_lights.py` | `scripts/utils/` | Draw numbered traffic light markers in CARLA |
+| `create_spawn_points.py` | `scripts/utils/` | Capture custom spawn points by flying spectator |
+| `frames_to_video.py` | `scripts/utils/` | Convert PNG frame sequences to MP4 |
 | `setup_scenario.py` | `scripts/capture/` | Position camera and select traffic light |
 | `capture_dataset.py` | `scripts/capture/` | Capture YOLO-format dataset |
 | `record_test.py` | `scripts/capture/` | Record test footage with ground truth |
+| `batch_capture.py` | `scripts/capture/` | Run multiple scenario configs sequentially |
 | `train.py` | `scripts/train/` | Train YOLOv11 model |
 | `evaluate_model.py` | `scripts/evaluate/` | Run detection + tracking evaluation |
 | `visualize_metrics.py` | `scripts/evaluate/` | Generate metric charts |
+| `compare_models.py` | `scripts/evaluate/` | Side-by-side comparison of multiple models |
+| `analyze_dataset.py` | `scripts/evaluate/` | Class distribution, imbalance warnings |
+| `generate_report.py` | `scripts/evaluate/` | Auto-generated HTML report |
+| `inference.py` | `scripts/evaluate/` | Run model on any MP4/webcam |
+| `setup_analytics.py` | `scripts/analytics/` | Calibration + lane + forbidden-line + entry-zone definition |
+| `traffic_analytics.py` | `scripts/analytics/` | Speed + queue + violations + entry counting + collisions on recorded video |
+| `live_analytics.py` | `scripts/analytics/` | Speed + queue + violations + entry counting + collisions live on CARLA |

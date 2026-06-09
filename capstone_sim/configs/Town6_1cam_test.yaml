@@ -13,7 +13,7 @@ cameras:
   image_height: 720
   fov: 70
 traffic_light:
-  id: 239
+  id: 116
   red_time: 3.0
   green_time: 15.0
   yellow_time: 2.0
@@ -96,7 +96,7 @@ simulation:
   train_ratio: 0.8
   fixed_delta_seconds: 0.05
 spawn:
-  max_vehicles: 25
+  max_vehicles: 15
   spawn_radius: 80.0
   radius_center: camera
   spawn_points: [368,369,370]

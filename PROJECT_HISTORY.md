@@ -607,6 +607,202 @@ Tried to fine-tune `best.pt` further on the cloud (vast.ai L40S):
 
 ---
 
+## Phase 10: Traffic Analytics System — V3.0 (May 12, 2026)
+
+> *Beyond detection metrics: real-world traffic measurements built on top of the trained model.*
+
+### Why
+Detection metrics (precision, recall, MOTA) measure how well the model *sees* — but a real deployment needs **traffic analytics**: how fast are vehicles going? How many are queued? When the original capstone scope mentioned speed estimation and queue length, these became the demo features that show the system as a complete traffic monitoring product, not just a model.
+
+### Architecture
+A new `capstone_sim/scripts/analytics/` folder was added:
+- `setup_analytics.py` — One-time configuration: camera calibration + lane definition
+- `traffic_analytics.py` — Run analytics on a recorded video / frame sequence
+- `live_analytics.py` — Same analytics live during a running CARLA simulation
+
+Configurations saved per-scenario to `capstone_sim/analytics_configs/<scenario>.yaml`. Run outputs (CSVs + video) saved to `capstone_sim/analytics_runs/<scenario>_<timestamp>/`.
+
+### Calibration
+
+The hardest part of building real-world analytics: knowing what a "pixel" means in real meters. Two paths:
+
+**For CARLA recordings (fully automatic):**
+- Camera intrinsics + extrinsics are known exactly
+- 4 sample pixels in the lower part of the image are projected onto the ground plane via ray-camera math
+- `cv2.findHomography` builds the 3x3 image→world matrix
+- **Zero user input needed** — happens automatically at end of `record_test.py`
+
+**For real video (manual 4-point homography):**
+- User clicks 4 corners of a known rectangle on the ground (e.g., lane markings, parking spot)
+- Types the real-world dimensions (e.g., 3.5m wide × 12m long)
+- Same homography computation
+- This is the **industry standard** approach used by commercial traffic systems
+
+### Speed Per Vehicle
+- For each tracked vehicle, take a reference point on the bounding box (at 50% width, 85% height — slightly above the very bottom to avoid bumper artifacts)
+- Apply homography → world (X, Y) in meters
+- Speed = displacement / frame interval, smoothed over a 5-frame rolling average
+- Color-coded labels in the video: gray (stopped), green (slow), yellow (normal), red (fast)
+
+### Per-Lane Queue Counts
+
+Interactive lane definition: click polygon corners around each lane, give it an ID. Saved to YAML.
+
+Per-frame logic:
+1. For each detection: is its speed below `speed_threshold_kmh` AND has it been below for `min_stationary_seconds`? (Both configurable in YAML)
+2. If yes: which lane polygon is it in?
+3. Increment that lane's queue count
+
+Configurable thresholds in `analytics_config.yaml`:
+```yaml
+queue:
+  speed_threshold_kmh: 7.2      # below this = "slow"
+  min_stationary_seconds: 2.0   # must be slow this long to count as queued
+```
+
+The 2-second threshold prevents false positives from vehicles briefly slowing down (e.g., turning).
+
+### Key Design Decisions
+
+**Camera reference point for ground projection**
+- Started with bbox bottom-center → gave incorrect lane assignment for large vehicles like fire trucks (the protruding bumper hit the ground at a different point than the truck's actual center)
+- Final: 50% horizontal × 85% vertical of bbox — closer to the middle of the vehicle body, more stable for lane assignment
+
+**Multi-pass calibration math**
+- First attempt: manual rotation matrix using CARLA's pitch/yaw/roll — failed because CARLA uses non-standard rotation conventions (positive pitch = nose up)
+- Fix: use `carla.Transform.get_forward_vector()` etc. directly — CARLA's API handles its own conventions correctly
+
+**Per-scenario configs in dedicated folder**
+- Originally tried saving `analytics_config.yaml` next to the scenario YAML — mixed configs with scenarios
+- Final: separate `analytics_configs/` folder; each file named to match the scenario's stem (`Town6_1cam.yaml`)
+
+**Two interfaces: live + recorded**
+- `live_analytics.py` works on a running CARLA simulation — spawns traffic from scenario, computes analytics in real time, includes the full spawn lifecycle (respawn, despawn, stuck detection) from `record_test.py`
+- `traffic_analytics.py` works on any recorded video or frame sequence — same outputs, different input
+
+### Output Format
+
+Each analytics run produces:
+- **`live_analytics.mp4` / `analytics.mp4`** — Annotated video with speed labels and per-lane queue overlays
+- **`per_track.csv`** — Every detection at every frame: `frame, track_id, class, world_x, world_y, speed_mps, speed_kmh`
+- **`per_lane_queue.csv`** — `frame, lane_id_1_count, lane_id_2_count, ...`
+- **`summary.json`** — Final stats: avg/max speed, max queue per lane, unique tracks, FPS
+
+### Industry Comparison
+The 4-point homography calibration is the same method used by commercial traffic systems like:
+- Iteris VantageNext (lane occupancy + queue length)
+- Econolite SPM (traffic light scheduling based on queue)
+- Cisco Meraki MV traffic analytics
+
+External calibrations (e.g., from camera mount specs or GPS drives) can be plugged in by writing the same homography matrix to `analytics_config.yaml`.
+
+### Challenges & Solutions
+
+**Challenge 1: CARLA's non-standard rotation conventions**
+- Manual rotation math produced wrong-direction rays that didn't hit the ground plane
+- Fix: use `carla.Transform.get_forward_vector()` directly
+
+**Challenge 2: numpy types in YAML output**
+- Initial dump produced `!!python/object/apply:numpy.core.multiarray.scalar` tags that couldn't be parsed back
+- Fix: cast all numpy values to native Python `int`/`float` before serialization
+
+**Challenge 3: Live mode wasn't following scenario rules**
+- Initial `live_analytics.py` only did one spawn at startup, missing respawn/despawn/stuck behavior
+- Fix: ported the full spawn lifecycle from `record_test.py`
+
+**Challenge 4: Lane assignment was off for large vehicles**
+- Bbox bottom-center put fire trucks in the wrong lane (front bumper protrudes left)
+- Fix: shifted reference point to 50% × 85% of bbox
+
+---
+
+## Phase 11: Light State & Red-Light Violation Detection — V3.0 (June 2026)
+
+> *Building on the analytics layer: traffic light state plumbing and the first violation detector.*
+
+### Why
+The original scope listed red-light violation detection and highway entry counting. Both depend on knowing the traffic light state per frame. The team has explicit permission to read light state directly from the CARLA simulator (treated as ground-truth signal infrastructure, not inferred from camera vision), which makes this tractable.
+
+### Light State Plumbing
+New shared module `scripts/utils/light_state.py` with a `LightStateProvider` that unifies three input modes behind one `state_at(frame_idx)` interface:
+- **Live CARLA** — wraps a `carla.TrafficLight` actor, reads state on demand
+- **Recorded** — reads a `light_states.csv` (frame, state) that `record_test.py` now logs every frame
+- **Real video** — reads a manual `light_schedule:` in `analytics_config.yaml`
+
+`record_test.py` now logs per-frame light state, and `traffic_analytics.py` / `live_analytics.py` draw a colored LIGHT indicator overlay.
+
+**Robustness fix:** CARLA traffic light actor IDs are not stable across sessions. `live_analytics.py` tries the stored id first, then falls back to the traffic light nearest the camera. (The user also found their config simply had a stale id; the fallback remains as a safety net.)
+
+### Forbidden Line Picker
+Added Step 3 to `setup_analytics.py` — a 2-point line picker (reusing the calibration `PointPicker`) to define stop lines. Saved as `forbidden_lines: [{id, points}]`. `--redo-lines` flag wipes and redefines.
+
+### Red-Light Violation Detection
+`ViolationDetector` (in `traffic_analytics.py`, used by both analytics scripts):
+- Tracks each vehicle's signed side of each line segment via cross product
+- A violation fires when a vehicle's ground reference point flips sides AND the crossing is within the segment span (projection parameter in [-0.1, 1.1]) AND the light is red
+- Each (track_id, line_id) is flagged once to avoid double-counting
+- Logged to `violations.csv` (frame, track_id, line_id, light_state); count added to `summary.json` and the HUD
+- Geometry was unit-tested before integration (crossing on red fires, on green doesn't, off-segment ignored, no double-count)
+
+### `k` Toggle for Demos
+CARLA autopilot vehicles obey traffic lights by default, so a normal run shows zero violations. Added a live `k` keypress in `live_analytics.py` that toggles all vehicles between ignoring and obeying red lights (via `tm.ignore_lights_percentage`), with newly-spawned vehicles inheriting the state. This makes the violation feature demonstrable on demand.
+
+### Challenges & Solutions
+
+**Challenge 5: `summary.json` lost on exit**
+- The summary was written *after* the try/finally; when CARLA cleanup in `finally` threw (simulator state changed on quit), the summary write was skipped entirely
+- Fix: moved the summary write inside `finally`, before the CARLA cleanup, wrapped in its own try/except — so the run stats are saved regardless of how the run ends
+
+---
+
+## Phase 12: Highway Entry Counting — V3.0 (June 2026)
+
+> *The last of the original analytics deliverables, reusing the light state and polygon infrastructure already in place.*
+
+### Why
+Highway on-ramps are often metered by traffic lights. The deliverable: count how many vehicles enter each ramp/entry zone, broken down by the light state at the moment of entry — directly useful for ramp-metering analytics and for spotting vehicles entering on red.
+
+### Implementation
+Because light state (`LightStateProvider`) and polygon definition (`PolygonPicker`, used for lanes) already existed, this was mostly composition:
+- `setup_analytics.py` — Step 4 adds an entry-zone polygon picker (`--redo-entry-zones`), saved as `entry_zones: [{id, polygon}]`
+- `traffic_analytics.py` — `EntryCounter` counts each unique vehicle once per zone, on the frame it first transitions outside→inside, recording the light state at entry. Logs `entries.csv` (frame, track_id, zone_id, light_state); per-zone totals broken down by light go to `summary.json` and the overlay/HUD
+- `live_analytics.py` — same, live
+
+### Key Design Decisions
+- **Count once per (track_id, zone)** — a vehicle entering is counted a single time even if detection jitter or re-entry occurs at the boundary, avoiding inflated counts
+- **Entry edge detection** — outside→inside transition (not just "currently inside"), so a vehicle already in the zone at spawn isn't miscounted later
+- **Grouped by light state** — `{zone: {total, by_light: {green, red, ...}}}` so "entered on red" is directly visible (the ramp-metering violation signal)
+
+Geometry was unit-tested before integration: entry on green and red recorded correctly, no double-count on re-entry, summary totals accurate.
+
+### Status
+This completes all of the originally-scoped analytics features. Remaining: collision detection (stretch goal, may be skipped).
+
+---
+
+## Phase 13: Collision Detection (stretch goal) — V3.0 (June 2026)
+
+> *The final stretch-goal feature. Heuristic, opt-in, and designed to resist the perspective false positives that plague camera-only collision detection.*
+
+### Why
+Camera-only collision detection is hard: perspective makes vehicles that are far apart in 3D appear to overlap in 2D, so naive bbox-overlap detection produces many false positives. The team treated this as an experimental stretch goal — useful if it works, acceptable to ship as opt-in.
+
+### Implementation
+`CollisionDetector` (in `traffic_analytics.py`, used by both analytics scripts) flags a pair of vehicles only when **all three** signals agree:
+1. **Bbox overlap** — IoU ≥ threshold (they visually touch)
+2. **World-space proximity** — ground-plane distance (via homography) within a few meters; this is the key guard against perspective false positives
+3. **Sudden speed drop** — at least one vehicle decelerates sharply within a short window (a real impact causes abrupt deceleration)
+
+Each unordered pair is flagged once. Opt-in via `--collisions`; thresholds tunable under `collision:` in the config. Logs `collisions.csv` (frame, track_a, track_b, world_dist_m); count in `summary.json` + HUD; involved vehicles drawn with red boxes + "COLLISION" marker.
+
+### Key Design Decision
+Using **world distance as a hard gate** (not just bbox IoU) is what makes this usable. Unit testing confirmed the guard: two boxes that overlap in the image but are 50m apart in world space are correctly ignored, while a genuine overlap + proximity + speed-drop is flagged.
+
+### Status
+All originally-scoped features plus the collision stretch goal are now complete. V3.0 delivers the full analytics suite: speed, per-lane queue, red-light violations, highway entry counting, and (experimental) collision detection.
+
+---
+
 ## Final Test Results
 
 Tested final model on `town02_test` recording (4,979 frames):
@@ -660,6 +856,8 @@ dataset_capstone/
     ├── configs/                   # 16 scenario YAMLs
     ├── models/yolov11m/
     │   └── best.pt                # final trained model
+    ├── analytics_configs/         # per-scenario analytics setups (V3.0)
+    ├── analytics_runs/            # gitignored — per-run output folders
     └── scripts/
         ├── capture/
         │   ├── capture_dataset.py
@@ -675,6 +873,10 @@ dataset_capstone/
         │   ├── analyze_dataset.py
         │   ├── generate_report.py
         │   └── inference.py
+        ├── analytics/             # V3.0
+        │   ├── setup_analytics.py
+        │   ├── traffic_analytics.py
+        │   └── live_analytics.py
         └── utils/
             ├── constants.py
             ├── bbox.py
@@ -682,7 +884,8 @@ dataset_capstone/
             ├── switch_map.py
             ├── visualize_spawns.py
             ├── visualize_traffic_lights.py
-            └── create_spawn_points.py
+            ├── create_spawn_points.py
+            └── frames_to_video.py
 ```
 
 ---
@@ -705,8 +908,9 @@ dataset_capstone/
 | `big_changes` | First major feature batch (capture_dataset.py) | Merged (PR #1) |
 | `model-training-and-testing` | YOLO training experiments | Standalone |
 | `V2` | Restructure + multi-camera + evaluation | Merged (PR #2) |
-| `V2.1` | Inference + custom spawn points + refinements | Open PR |
-| `V2.2` | Stuck vehicle detection + frames_to_video utility | Open PR |
+| `V2.1` | Inference + custom spawn points + refinements | Merged |
+| `V2.2` | Stuck vehicle detection + frames_to_video utility | Merged |
+| `V3.0` | Traffic analytics: calibration, speed, queue per lane | Open PR |
 
 ---
 
@@ -739,3 +943,7 @@ dataset_capstone/
 | **2026-05-02** | Cloud training on vast.ai L40S — 0.949 mAP50 | dataset_capstone |
 | **2026-05-03** | Inference on real video, custom spawn points, traffic light viz, V2.1 PR | dataset_capstone |
 | **2026-05-11** | Continued training attempt (abandoned), stuck vehicle detection, frames_to_video utility, V2.2 | dataset_capstone |
+| **2026-05-12** | Traffic analytics system: calibration, speed per car, per-lane queue length, live + recorded modes, V3.0 | dataset_capstone |
+| **2026-06-09** | Light state plumbing, forbidden-line picker, red-light violation detection, `k` demo toggle | dataset_capstone |
+| **2026-06-09** | Highway entry zones + entry counting grouped by light state | dataset_capstone |
+| **2026-06-09** | Collision detection (experimental, opt-in) — completes the analytics suite | dataset_capstone |
