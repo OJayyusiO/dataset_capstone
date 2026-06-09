@@ -76,7 +76,16 @@ def compute_target_counts(ratios, max_vehicles):
     for class_name, ratio in ratios.items():
         class_id = CLASS_NAME_TO_ID.get(class_name)
         if class_id is not None:
-            targets[class_id] = max(1, round(ratio / total_ratio * max_vehicles))
+            count = round(ratio / total_ratio * max_vehicles)
+            if count > 0:
+                targets[class_id] = count
+
+    # If rounding caused total to exceed max_vehicles, trim the largest classes
+    while sum(targets.values()) > max_vehicles:
+        largest = max(targets, key=targets.get)
+        targets[largest] -= 1
+        if targets[largest] == 0:
+            del targets[largest]
     return targets
 
 

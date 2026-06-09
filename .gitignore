@@ -10,3 +10,6 @@ eval_results/
 custom_spawn_points.yaml
 comparison_results/
 analytics_runs/
+demo.mp4
+vehicle_dimensions.csv
+~$*.docx

@@ -402,10 +402,10 @@ def run(scenario_path, model_path, save_video, spawn_traffic, conf, iou,
                     draw_detection(frame, xyxy, cls, track_id, conf_score, speed_mps * 3.6)
 
                     # Log per-track CSV row
-                    world = pixel_to_world(H, ref_x, ref_y) or (0, 0)
+                    world_pos = pixel_to_world(H, ref_x, ref_y) or (0, 0)
                     csv_writer.writerow([
                         frame_idx, track_id, CLASS_NAMES.get(cls, cls),
-                        round(world[0], 3), round(world[1], 3),
+                        round(world_pos[0], 3), round(world_pos[1], 3),
                         round(speed_mps, 3), round(speed_mps * 3.6, 1),
                     ])
                     speed_samples.append(speed_mps)

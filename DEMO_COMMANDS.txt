@@ -1,0 +1,58 @@
+python capstone_sim/scripts/analytics/live_analytics.py capstone_sim/configs/Town6_1cam_test.yaml capstone_sim/models/yolov11m/best.pt
+
+# Same demo but also save the annotated feed to MP4:
+python capstone_sim/scripts/analytics/live_analytics.py capstone_sim/configs/Town6_1cam_test.yaml capstone_sim/models/yolov11m/best.pt --save-video
+
+
+python capstone_sim/scripts/evaluate/inference.py --model capstone_sim/models/yolov11m/best.pt --source <path_to_video.mp4>
+
+
+
+RUN MODEL ON LIVE WEBCAM:
+
+# Source = "0" means the default webcam. Press 'q' to stop.
+
+python capstone_sim/scripts/evaluate/inference.py --model capstone_sim/models/yolov11m/best.pt --source 0 --show
+
+
+RECORD NEW TEST FOOTAGE FROM CARLA (re-create a recording):
+python capstone_sim/scripts/capture/record_test.py capstone_sim/configs/Town6_1cam_test.yaml
+
+
+
+RUN ANALYTICS ON A RECORDED FOLDER (not live)
+
+python capstone_sim/scripts/analytics/traffic_analytics.py test_recordings/<recording_dir> capstone_sim/models/yolov11m/best.pt
+
+
+
+EVALUATE THE MODEL ON A TEST RECORDING (detection + tracking metrics):
+# Produces: annotated.mp4, metrics_summary.json, per_frame_metrics.csv,
+# charts, confusion matrix, and a self-contained report.html.
+python capstone_sim/scripts/evaluate/evaluate_model.py test_recordings/<recording_dir> capstone_sim/models/yolov11m/best.pt
+
+
+DEFINE NEW LANES OR RECALIBRATE (only needed if changing scenario):
+# Calibration auto-runs from the scenario's camera params.
+# Use --redo-lanes to wipe and redefine lanes interactively.
+
+python capstone_sim/scripts/analytics/setup_analytics.py capstone_sim/configs/Town6_1cam_test.yaml --redo-lanes
+
+
+
+USEFUL UTILITIES:
+
+# Switch map manually
+python capstone_sim/scripts/utils/switch_map.py Town06
+
+# Visualize all spawn points (numbered green markers in CARLA)
+python capstone_sim/scripts/utils/visualize_spawns.py
+
+# Visualize all traffic lights (numbered yellow markers in CARLA)
+python capstone_sim/scripts/utils/visualize_traffic_lights.py
+
+# Convert PNG frame sequence to MP4
+python capstone_sim/scripts/utils/frames_to_video.py test_recordings/<recording_dir>/frames
+
+
+
