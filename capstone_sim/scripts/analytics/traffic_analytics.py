@@ -27,6 +27,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from capstone_sim.scripts.utils.constants import CLASS_NAMES, CLASS_COLORS
+from capstone_sim.scripts.utils.light_state import LightStateProvider, draw_light_indicator
 
 try:
     from ultralytics import YOLO
@@ -279,6 +280,85 @@ def draw_lanes_overlay(frame, lanes, queue_counts):
 
 
 # --------------------------------------------------------------------------- #
+# Forbidden lines / red-light violation logic
+# --------------------------------------------------------------------------- #
+
+def _segment_side(p, a, b):
+    """Signed area (cross product) telling which side of line A->B point P is on."""
+    return (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
+
+
+def _projection_param(p, a, b):
+    """Parameter t of the perpendicular projection of P onto segment A->B.
+
+    t in [0, 1] means the foot of the perpendicular is within the segment.
+    """
+    abx, aby = b[0] - a[0], b[1] - a[1]
+    denom = abx * abx + aby * aby
+    if denom == 0:
+        return -1.0
+    return ((p[0] - a[0]) * abx + (p[1] - a[1]) * aby) / denom
+
+
+class ViolationDetector:
+    """Detects vehicles crossing a forbidden line while the light is red.
+
+    A violation fires when a tracked vehicle's ground reference point flips
+    from one side of a line segment to the other (and the crossing is within
+    the segment span), while the current light state is 'red'.
+    """
+
+    def __init__(self, lines):
+        self.lines = lines or []
+        self.prev_side = {}        # (track_id, line_id) -> last side sign (-1/0/1)
+        self.flagged = set()       # (track_id, line_id) already counted, avoid double-count
+
+    def check(self, detections, light_state, frame_idx):
+        """Return a list of new violations this frame: {track_id, line_id, frame}."""
+        new_violations = []
+        is_red = (light_state == 'red')
+        for det in detections:
+            tid = det['track_id']
+            p = det['point']
+            for line in self.lines:
+                a, b = line['points'][0], line['points'][1]
+                raw = _segment_side(p, a, b)
+                sign = 1 if raw > 0 else (-1 if raw < 0 else 0)
+                key = (tid, line['id'])
+                prev = self.prev_side.get(key)
+                self.prev_side[key] = sign
+
+                if prev is None or sign == 0 or prev == 0 or sign == prev:
+                    continue  # no clean side flip
+                # Crossed the infinite line; require it to be within the segment span
+                t = _projection_param(p, a, b)
+                if not (-0.1 <= t <= 1.1):
+                    continue
+                if is_red and key not in self.flagged:
+                    self.flagged.add(key)
+                    new_violations.append({
+                        'track_id': tid,
+                        'line_id': line['id'],
+                        'frame': frame_idx,
+                    })
+        return new_violations
+
+
+def draw_forbidden_lines(frame, lines, active_violation=False):
+    """Draw forbidden lines. Red normally; brighter/thicker when a violation just fired."""
+    if not lines:
+        return
+    for line in lines:
+        a = tuple(line['points'][0])
+        b = tuple(line['points'][1])
+        thickness = 4 if active_violation else 2
+        cv2.line(frame, a, b, (0, 0, 255), thickness)
+        mid = ((a[0] + b[0]) // 2, (a[1] + b[1]) // 2)
+        cv2.putText(frame, line['id'], (mid[0], mid[1] - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+
+
+# --------------------------------------------------------------------------- #
 # Drawing
 # --------------------------------------------------------------------------- #
 
@@ -336,6 +416,18 @@ def run(source_arg, model_path, output_dir, conf, iou, show):
     queue_min_seconds = queue_cfg.get('min_stationary_seconds', DEFAULT_QUEUE_MIN_STATIONARY_SECONDS)
     queue_tracker = QueueTracker(queue_speed_kmh, queue_min_seconds, fps)
 
+    # Traffic light state: prefer recorded light_states.csv, else a manual schedule
+    # in analytics_config.yaml (light_schedule: [{frame, state}, ...])
+    light_csv = source_dir / 'light_states.csv'
+    if light_csv.exists():
+        light_provider = LightStateProvider.from_csv(light_csv)
+    else:
+        light_provider = LightStateProvider.from_schedule(config.get('light_schedule'))
+
+    # Forbidden lines + red-light violation detection
+    forbidden_lines = config.get('forbidden_lines', [])
+    violation_detector = ViolationDetector(forbidden_lines)
+
     print("Traffic Analytics — Speed + Queue per lane")
     print("=" * 60)
     print(f"Source:      {source_arg}")
@@ -345,6 +437,8 @@ def run(source_arg, model_path, output_dir, conf, iou, show):
     print(f"Calibration: {config['calibration'].get('mode', '?')}")
     print(f"Lanes:       {len(lanes)}")
     print(f"Queue:       slower than {queue_speed_kmh:.1f} km/h for {queue_min_seconds:.1f}+ sec")
+    print(f"Light state: {'available (' + light_provider.mode + ')' if light_provider.available else 'none'}")
+    print(f"Forbidden lines: {len(forbidden_lines)}")
     print(f"Output:      {output_dir.resolve()}")
     print("=" * 60)
 
@@ -372,9 +466,19 @@ def run(source_arg, model_path, output_dir, conf, iou, show):
         queue_csv_writer = csv.writer(queue_csv_file)
         queue_csv_writer.writerow(['frame'] + [lane['id'] for lane in lanes])
 
+    # CSV log of violations
+    violation_csv_file = None
+    violation_csv_writer = None
+    if forbidden_lines:
+        violation_csv_path = output_dir / 'violations.csv'
+        violation_csv_file = open(violation_csv_path, 'w', newline='')
+        violation_csv_writer = csv.writer(violation_csv_file)
+        violation_csv_writer.writerow(['frame', 'track_id', 'line_id', 'light_state'])
+
     frame_idx = 0
     start_time = time.time()
     track_ids_seen = set()
+    total_violations = 0
 
     try:
         for frame in frame_iter:
@@ -427,10 +531,37 @@ def run(source_arg, model_path, output_dir, conf, iou, show):
                 if queue_csv_writer:
                     queue_csv_writer.writerow([frame_idx] + [queue_counts.get(l['id'], 0) for l in lanes])
 
+            # Current light state for this frame
+            light_state = light_provider.state_at(frame_idx) if light_provider.available else 'unknown'
+
+            # Red-light violations
+            violations_now = []
+            if forbidden_lines:
+                violations_now = violation_detector.check(frame_detections, light_state, frame_idx)
+                for v in violations_now:
+                    total_violations += 1
+                    if violation_csv_writer:
+                        violation_csv_writer.writerow([v['frame'], v['track_id'], v['line_id'], light_state])
+                    print(f"  VIOLATION: track #{v['track_id']} crossed {v['line_id']} on red (frame {frame_idx})")
+                draw_forbidden_lines(frame, forbidden_lines, active_violation=bool(violations_now))
+
+            # Traffic light indicator
+            if light_provider.available:
+                draw_light_indicator(frame, light_state)
+
+            # Violation banner
+            if violations_now:
+                vtxt = f"RED-LIGHT VIOLATION x{len(violations_now)}"
+                (tw, th), _ = cv2.getTextSize(vtxt, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)
+                cv2.rectangle(frame, (width // 2 - tw // 2 - 12, 50),
+                              (width // 2 + tw // 2 + 12, 50 + th + 16), (0, 0, 255), -1)
+                cv2.putText(frame, vtxt, (width // 2 - tw // 2, 50 + th + 4),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
+
             # HUD overlay
             elapsed = time.time() - start_time
             inference_fps = (frame_idx + 1) / max(elapsed, 0.001)
-            hud = f"Frame {frame_idx}  |  {inference_fps:.1f} FPS  |  Tracks: {len(track_ids_seen)}"
+            hud = f"Frame {frame_idx}  |  {inference_fps:.1f} FPS  |  Tracks: {len(track_ids_seen)}  |  Violations: {total_violations}"
             cv2.putText(frame, hud, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
                         (255, 255, 255), 2)
 
@@ -452,12 +583,16 @@ def run(source_arg, model_path, output_dir, conf, iou, show):
         csv_file.close()
         if queue_csv_file:
             queue_csv_file.close()
+        if violation_csv_file:
+            violation_csv_file.close()
         if show:
             cv2.destroyAllWindows()
 
     elapsed = time.time() - start_time
     print(f"\nDone — processed {frame_idx} frames in {elapsed:.1f}s ({frame_idx / max(elapsed, 0.001):.1f} FPS)")
     print(f"  Unique tracks: {len(track_ids_seen)}")
+    if forbidden_lines:
+        print(f"  Red-light violations: {total_violations}")
     print(f"  Video:        {output_video.resolve()}")
     print(f"  Per-track CSV: {csv_path.resolve()}")
 

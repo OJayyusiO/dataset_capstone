@@ -13,7 +13,7 @@ cameras:
   image_height: 720
   fov: 70
 traffic_light:
-  id: 239
+  id: 116
   red_time: 3.0
   green_time: 15.0
   yellow_time: 2.0

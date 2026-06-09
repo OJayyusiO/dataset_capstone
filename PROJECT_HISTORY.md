@@ -716,6 +716,45 @@ External calibrations (e.g., from camera mount specs or GPS drives) can be plugg
 
 ---
 
+## Phase 11: Light State & Red-Light Violation Detection — V3.0 (June 2026)
+
+> *Building on the analytics layer: traffic light state plumbing and the first violation detector.*
+
+### Why
+The original scope listed red-light violation detection and highway entry counting. Both depend on knowing the traffic light state per frame. The team has explicit permission to read light state directly from the CARLA simulator (treated as ground-truth signal infrastructure, not inferred from camera vision), which makes this tractable.
+
+### Light State Plumbing
+New shared module `scripts/utils/light_state.py` with a `LightStateProvider` that unifies three input modes behind one `state_at(frame_idx)` interface:
+- **Live CARLA** — wraps a `carla.TrafficLight` actor, reads state on demand
+- **Recorded** — reads a `light_states.csv` (frame, state) that `record_test.py` now logs every frame
+- **Real video** — reads a manual `light_schedule:` in `analytics_config.yaml`
+
+`record_test.py` now logs per-frame light state, and `traffic_analytics.py` / `live_analytics.py` draw a colored LIGHT indicator overlay.
+
+**Robustness fix:** CARLA traffic light actor IDs are not stable across sessions. `live_analytics.py` tries the stored id first, then falls back to the traffic light nearest the camera. (The user also found their config simply had a stale id; the fallback remains as a safety net.)
+
+### Forbidden Line Picker
+Added Step 3 to `setup_analytics.py` — a 2-point line picker (reusing the calibration `PointPicker`) to define stop lines. Saved as `forbidden_lines: [{id, points}]`. `--redo-lines` flag wipes and redefines.
+
+### Red-Light Violation Detection
+`ViolationDetector` (in `traffic_analytics.py`, used by both analytics scripts):
+- Tracks each vehicle's signed side of each line segment via cross product
+- A violation fires when a vehicle's ground reference point flips sides AND the crossing is within the segment span (projection parameter in [-0.1, 1.1]) AND the light is red
+- Each (track_id, line_id) is flagged once to avoid double-counting
+- Logged to `violations.csv` (frame, track_id, line_id, light_state); count added to `summary.json` and the HUD
+- Geometry was unit-tested before integration (crossing on red fires, on green doesn't, off-segment ignored, no double-count)
+
+### `k` Toggle for Demos
+CARLA autopilot vehicles obey traffic lights by default, so a normal run shows zero violations. Added a live `k` keypress in `live_analytics.py` that toggles all vehicles between ignoring and obeying red lights (via `tm.ignore_lights_percentage`), with newly-spawned vehicles inheriting the state. This makes the violation feature demonstrable on demand.
+
+### Challenges & Solutions
+
+**Challenge 5: `summary.json` lost on exit**
+- The summary was written *after* the try/finally; when CARLA cleanup in `finally` threw (simulator state changed on quit), the summary write was skipped entirely
+- Fix: moved the summary write inside `finally`, before the CARLA cleanup, wrapped in its own try/except — so the run stats are saved regardless of how the run ends
+
+---
+
 ## Final Test Results
 
 Tested final model on `town02_test` recording (4,979 frames):
@@ -857,3 +896,4 @@ dataset_capstone/
 | **2026-05-03** | Inference on real video, custom spawn points, traffic light viz, V2.1 PR | dataset_capstone |
 | **2026-05-11** | Continued training attempt (abandoned), stuck vehicle detection, frames_to_video utility, V2.2 | dataset_capstone |
 | **2026-05-12** | Traffic analytics system: calibration, speed per car, per-lane queue length, live + recorded modes, V3.0 | dataset_capstone |
+| **2026-06-09** | Light state plumbing, forbidden-line picker, red-light violation detection, `k` demo toggle | dataset_capstone |

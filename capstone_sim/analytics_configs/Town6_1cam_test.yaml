@@ -76,3 +76,10 @@ queue:
   speed_threshold_kmh: 5
   min_stationary_seconds: 2.0
 source: Town6_1cam_test
+forbidden_lines:
+- id: stop_line
+  points:
+  - - 292
+    - 503
+  - - 516
+    - 717

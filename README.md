@@ -291,7 +291,7 @@ For CARLA scenarios — calibration is fully automatic from camera intrinsics + 
 python capstone_sim/scripts/analytics/setup_analytics.py capstone_sim/configs/Town6_1cam.yaml
 ```
 
-This connects to CARLA, spawns the scenario camera, captures one frame, auto-calibrates, then lets you click polygon corners for each lane. Saves to `capstone_sim/analytics_configs/<scenario>.yaml`.
+This connects to CARLA, spawns the scenario camera, captures one frame, auto-calibrates, then walks through three steps: **(1) calibration**, **(2) lane polygons**, **(3) forbidden lines** (stop lines for red-light violations). Saves to `capstone_sim/analytics_configs/<scenario>.yaml`.
 
 For real video / CCTV — calibration is manual (click 4 corners of a known rectangle):
 
@@ -307,6 +307,7 @@ Source can also be a recording directory, webcam (`0`), or RTSP stream URL.
 |------|-------------|
 | `--recalibrate` | Redo calibration |
 | `--redo-lanes` | Wipe existing lanes and define fresh |
+| `--redo-lines` | Wipe existing forbidden lines and define fresh |
 | `--manual` | Force manual calibration |
 
 ### 2. Run live analytics on CARLA
@@ -315,13 +316,20 @@ Source can also be a recording directory, webcam (`0`), or RTSP stream URL.
 python capstone_sim/scripts/analytics/live_analytics.py capstone_sim/configs/Town6_1cam.yaml capstone_sim/models/yolov11m/best.pt
 ```
 
-Spawns traffic from the scenario, runs detection + tracking + speed + per-lane queue counts in real time. Saves results to `capstone_sim/analytics_runs/<scenario>_<timestamp>/`.
+Spawns traffic from the scenario, runs detection + tracking + speed + per-lane queue counts + red-light violation detection in real time. Reads the traffic light state directly from CARLA. Saves results to `capstone_sim/analytics_runs/<scenario>_<timestamp>/`.
 
 | Flag | Description |
 |------|-------------|
 | `--save-video` | Save the annotated feed as MP4 |
 | `--no-spawn` | Skip spawning vehicles (use if CARLA already has traffic) |
 | `--conf` / `--iou` | Detection thresholds |
+
+**Live keyboard controls:**
+
+| Key | Action |
+|-----|--------|
+| `k` | Toggle all vehicles ignoring red lights (for demoing violations — CARLA vehicles obey lights by default) |
+| `q` | Quit |
 
 ### 3. Run analytics on a recorded video
 
@@ -334,10 +342,11 @@ Same outputs as live mode, but on recorded footage.
 ### Outputs
 
 Both live and recorded analytics save:
-- `live_analytics.mp4` / `analytics.mp4` — Annotated video with speed labels and per-lane queue overlays
+- `live_analytics.mp4` / `analytics.mp4` — Annotated video with speed labels, per-lane queue overlays, light indicator, and violation banners
 - `per_track.csv` — Per-frame, per-track: track_id, class, world_x, world_y, speed
 - `per_lane_queue.csv` — Per-frame queue count for each lane
-- `summary.json` — Final stats: avg/max speed, max queue per lane, unique tracks, FPS
+- `violations.csv` — Each red-light violation: frame, track_id, line_id, light_state
+- `summary.json` — Final stats: avg/max speed, max queue per lane, total violations, unique tracks, FPS
 
 ### Queue thresholds
 
@@ -348,6 +357,18 @@ queue:
   speed_threshold_kmh: 7.2          # below this = "slow"
   min_stationary_seconds: 2.0        # must be slow for this long to count as queued
 ```
+
+### Traffic light state & red-light violations
+
+Light state is read directly from CARLA (live + recorded). For real video, define a manual schedule in `analytics_config.yaml`:
+
+```yaml
+light_schedule:
+  - {frame: 0, state: red}
+  - {frame: 150, state: green}
+```
+
+A vehicle that crosses a forbidden line (defined in setup step 3) while the light is red is logged as a violation. For CARLA recordings, `record_test.py` auto-logs per-frame light state to `light_states.csv`.
 
 ---
 
@@ -371,6 +392,6 @@ queue:
 | `analyze_dataset.py` | `scripts/evaluate/` | Class distribution, imbalance warnings |
 | `generate_report.py` | `scripts/evaluate/` | Auto-generated HTML report |
 | `inference.py` | `scripts/evaluate/` | Run model on any MP4/webcam |
-| `setup_analytics.py` | `scripts/analytics/` | Calibration + lane definition |
-| `traffic_analytics.py` | `scripts/analytics/` | Speed + queue on recorded video |
-| `live_analytics.py` | `scripts/analytics/` | Speed + queue live on CARLA simulation |
+| `setup_analytics.py` | `scripts/analytics/` | Calibration + lane + forbidden-line definition |
+| `traffic_analytics.py` | `scripts/analytics/` | Speed + queue + red-light violations on recorded video |
+| `live_analytics.py` | `scripts/analytics/` | Speed + queue + red-light violations live on CARLA |

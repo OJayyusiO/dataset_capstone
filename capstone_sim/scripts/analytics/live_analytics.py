@@ -39,11 +39,12 @@ from capstone_sim.scripts.utils.carla_helpers import (
     build_class_blueprint_map, compute_target_counts,
     spawn_to_fill, despawn_far_vehicles,
 )
+from capstone_sim.scripts.utils.light_state import LightStateProvider, draw_light_indicator
 from capstone_sim.scripts.analytics.setup_analytics import auto_calibrate_from_carla
 from capstone_sim.scripts.analytics.traffic_analytics import (
     SpeedTracker, QueueTracker, draw_detection, pixel_to_world,
     compute_queue_counts, draw_lanes_overlay,
-    vehicle_ground_point,
+    vehicle_ground_point, ViolationDetector, draw_forbidden_lines,
     DEFAULT_QUEUE_SPEED_KMH, DEFAULT_QUEUE_MIN_STATIONARY_SECONDS,
 )
 
@@ -109,11 +110,13 @@ def run(scenario_path, model_path, save_video, spawn_traffic, conf, iou,
 
     lanes = []
     queue_cfg = {}
+    forbidden_lines = []
     if analytics_config_path:
         with open(analytics_config_path) as f:
             ac = yaml.safe_load(f)
         lanes = ac.get('lanes', [])
         queue_cfg = ac.get('queue', {})
+        forbidden_lines = ac.get('forbidden_lines', [])
         if 'calibration' in ac:
             calibration = ac['calibration']
             print(f"Using calibration + {len(lanes)} lane(s) from {analytics_config_path}")
@@ -132,6 +135,7 @@ def run(scenario_path, model_path, save_video, spawn_traffic, conf, iou,
 
     queue_speed_kmh = queue_cfg.get('speed_threshold_kmh', DEFAULT_QUEUE_SPEED_KMH)
     queue_min_seconds = queue_cfg.get('min_stationary_seconds', DEFAULT_QUEUE_MIN_STATIONARY_SECONDS)
+    violation_detector = ViolationDetector(forbidden_lines)
 
     # Camera params (use first camera)
     if 'cameras' in scenario:
@@ -201,6 +205,30 @@ def run(scenario_path, model_path, save_video, spawn_traffic, conf, iou,
         camera.listen(image_queue.put)
         world.tick()
 
+        # Find the scenario's traffic light for live light-state readout.
+        # CARLA assigns traffic light actor IDs at world load, and they are NOT
+        # guaranteed stable across sessions. So: try the stored id first, then
+        # fall back to the traffic light nearest the camera (almost always the
+        # one controlling the intersection in view).
+        light_provider = LightStateProvider(mode='none')
+        light_id = scenario.get('traffic_light', {}).get('id')
+        all_lights = list(world.get_actors().filter('traffic.traffic_light'))
+        selected_light = None
+        if light_id:
+            selected_light = next((l for l in all_lights if l.id == light_id), None)
+            if selected_light:
+                print(f"Reading live state from traffic light {light_id}")
+        if selected_light is None and all_lights:
+            cam_loc = camera.get_transform().location
+            selected_light = min(
+                all_lights,
+                key=lambda l: l.get_transform().location.distance(cam_loc),
+            )
+            print(f"Traffic light id {light_id} not found this session; "
+                  f"using nearest light (id {selected_light.id}) to the camera instead")
+        if selected_light is not None:
+            light_provider = LightStateProvider.from_carla(selected_light)
+
         if save_video:
             video_path = output_dir / 'live_analytics.mp4'
             writer = cv2.VideoWriter(str(video_path),
@@ -221,9 +249,18 @@ def run(scenario_path, model_path, save_video, spawn_traffic, conf, iou,
             queue_csv_writer = csv.writer(queue_csv_file)
             queue_csv_writer.writerow(['frame'] + [lane['id'] for lane in lanes])
 
+        violation_csv_file = None
+        violation_csv_writer = None
+        if forbidden_lines:
+            violation_csv_path = output_dir / 'violations.csv'
+            violation_csv_file = open(violation_csv_path, 'w', newline='')
+            violation_csv_writer = csv.writer(violation_csv_file)
+            violation_csv_writer.writerow(['frame', 'track_id', 'line_id', 'light_state'])
+
         # Stats trackers for summary
         max_queue_per_lane = defaultdict(int)
         speed_samples = []  # all per-detection speeds in m/s
+        total_violations = 0
 
         # Set up spawn lifecycle from scenario YAML (matches record_test.py)
         spawn_config = scenario.get('spawn', {})
@@ -293,6 +330,17 @@ def run(scenario_path, model_path, save_video, spawn_traffic, conf, iou,
         start_time = time.time()
         track_ids_seen = set()
         last_check_positions = {}  # for stuck detection
+        ignore_lights = False      # toggled with 'k' — makes vehicles run red lights
+
+        def apply_ignore_lights(pct):
+            for v, _ in current_vehicles:
+                if v.is_alive:
+                    try:
+                        tm.ignore_lights_percentage(v, pct)
+                    except RuntimeError:
+                        pass
+
+        print("Controls: 'k' = toggle vehicles ignoring red lights, 'q' = quit")
 
         while True:
             world.tick()
@@ -363,6 +411,10 @@ def run(scenario_path, model_path, save_video, spawn_traffic, conf, iou,
                                 pass
                         print(f"  Removed {stuck_count} stuck vehicle(s)")
 
+            # If "ignore lights" is on, keep newly spawned vehicles running reds too
+            if ignore_lights:
+                apply_ignore_lights(100.0)
+
             # Drain queue, keep latest
             latest = None
             try:
@@ -423,11 +475,46 @@ def run(scenario_path, model_path, save_video, spawn_traffic, conf, iou,
                     if count > max_queue_per_lane[lid]:
                         max_queue_per_lane[lid] = count
 
+            # Current light state for this frame
+            light_state = light_provider.state_at(frame_idx) if light_provider.available else 'unknown'
+
+            # Red-light violations
+            violations_now = []
+            if forbidden_lines:
+                violations_now = violation_detector.check(frame_detections, light_state, frame_idx)
+                for v in violations_now:
+                    total_violations += 1
+                    if violation_csv_writer:
+                        violation_csv_writer.writerow([v['frame'], v['track_id'], v['line_id'], light_state])
+                    print(f"  VIOLATION: track #{v['track_id']} crossed {v['line_id']} on red (frame {frame_idx})")
+                draw_forbidden_lines(frame, forbidden_lines, active_violation=bool(violations_now))
+
+            # Traffic light indicator
+            if light_provider.available:
+                draw_light_indicator(frame, light_state)
+
+            # Violation banner
+            if violations_now:
+                vtxt = f"RED-LIGHT VIOLATION x{len(violations_now)}"
+                (tw, th), _ = cv2.getTextSize(vtxt, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)
+                cv2.rectangle(frame, (image_w // 2 - tw // 2 - 12, 50),
+                              (image_w // 2 + tw // 2 + 12, 50 + th + 16), (0, 0, 255), -1)
+                cv2.putText(frame, vtxt, (image_w // 2 - tw // 2, 50 + th + 4),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
+
             elapsed = time.time() - start_time
             real_fps = (frame_idx + 1) / max(elapsed, 0.001)
-            hud = f"Frame {frame_idx}  |  {real_fps:.1f} FPS  |  Tracks: {len(track_ids_seen)}"
+            hud = f"Frame {frame_idx}  |  {real_fps:.1f} FPS  |  Tracks: {len(track_ids_seen)}  |  Violations: {total_violations}"
             cv2.putText(frame, hud, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
                         (255, 255, 255), 2)
+
+            # "Ignore lights" status badge (toggled with 'k')
+            if ignore_lights:
+                badge = "IGNORE LIGHTS: ON (k)"
+                (bw, bh), _ = cv2.getTextSize(badge, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+                cv2.rectangle(frame, (10, 40), (10 + bw + 12, 40 + bh + 14), (0, 0, 200), -1)
+                cv2.putText(frame, badge, (16, 40 + bh + 4),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
             cv2.imshow('Live Analytics', frame)
             if writer is not None:
@@ -436,17 +523,63 @@ def run(scenario_path, model_path, save_video, spawn_traffic, conf, iou,
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
                 break
+            if key == ord('k'):
+                ignore_lights = not ignore_lights
+                apply_ignore_lights(100.0 if ignore_lights else 0.0)
+                print(f"  [k] Vehicles {'IGNORING' if ignore_lights else 'OBEYING'} traffic lights")
 
             frame_idx += 1
 
     except KeyboardInterrupt:
         print("\nStopped by user")
     finally:
+        # Close data files first so they're flushed no matter what
         if writer is not None:
             writer.release()
         csv_file.close()
         if queue_csv_file:
             queue_csv_file.close()
+        if violation_csv_file:
+            violation_csv_file.close()
+
+        # Write summary JSON BEFORE the CARLA cleanup (which can throw if the
+        # simulator state changed), so the run summary is always saved.
+        try:
+            elapsed = time.time() - start_time
+            avg_speed_mps = float(np.mean(speed_samples)) if speed_samples else 0.0
+            max_speed_mps = float(np.max(speed_samples)) if speed_samples else 0.0
+            summary = {
+                'scenario': str(scenario_path),
+                'model': str(model_path),
+                'run_started': datetime.fromtimestamp(start_time).isoformat(),
+                'duration_seconds': round(elapsed, 1),
+                'frames_processed': frame_idx,
+                'inference_fps': round(frame_idx / max(elapsed, 0.001), 1),
+                'unique_tracks': len(track_ids_seen),
+                'total_detections': len(speed_samples),
+                'avg_speed_kmh': round(avg_speed_mps * 3.6, 1),
+                'max_speed_kmh': round(max_speed_mps * 3.6, 1),
+                'max_queue_per_lane': dict(max_queue_per_lane),
+                'total_red_light_violations': total_violations,
+                'calibration_mode': calibration.get('mode'),
+                'num_lanes': len(lanes),
+                'num_forbidden_lines': len(forbidden_lines),
+            }
+            with open(output_dir / 'summary.json', 'w') as f:
+                json.dump(summary, f, indent=2)
+            print(f"\nDone — {frame_idx} frames in {elapsed:.1f}s ({frame_idx / max(elapsed, 0.001):.1f} FPS)")
+            print(f"  Unique tracks: {len(track_ids_seen)}")
+            print(f"  Avg speed: {summary['avg_speed_kmh']} km/h, Max: {summary['max_speed_kmh']} km/h")
+            if max_queue_per_lane:
+                for lid, count in max_queue_per_lane.items():
+                    print(f"  Max queue in {lid}: {count}")
+            if forbidden_lines:
+                print(f"  Red-light violations: {total_violations}")
+            print(f"\nResults saved to: {output_dir.resolve()}")
+        except Exception as e:
+            print(f"  Warning: could not write summary.json: {e}")
+
+        # CARLA cleanup last (any failure here no longer loses the summary)
         cv2.destroyAllWindows()
         for actor in actor_list:
             if actor.is_alive:
@@ -456,37 +589,6 @@ def run(scenario_path, model_path, save_video, spawn_traffic, conf, iou,
                 actor.destroy()
         world.apply_settings(original_settings)
         tm.set_synchronous_mode(False)
-
-    elapsed = time.time() - start_time
-
-    # Write summary JSON
-    avg_speed_mps = float(np.mean(speed_samples)) if speed_samples else 0.0
-    max_speed_mps = float(np.max(speed_samples)) if speed_samples else 0.0
-    summary = {
-        'scenario': str(scenario_path),
-        'model': str(model_path),
-        'run_started': datetime.fromtimestamp(start_time).isoformat(),
-        'duration_seconds': round(elapsed, 1),
-        'frames_processed': frame_idx,
-        'inference_fps': round(frame_idx / max(elapsed, 0.001), 1),
-        'unique_tracks': len(track_ids_seen),
-        'total_detections': len(speed_samples),
-        'avg_speed_kmh': round(avg_speed_mps * 3.6, 1),
-        'max_speed_kmh': round(max_speed_mps * 3.6, 1),
-        'max_queue_per_lane': dict(max_queue_per_lane),
-        'calibration_mode': calibration.get('mode'),
-        'num_lanes': len(lanes),
-    }
-    with open(output_dir / 'summary.json', 'w') as f:
-        json.dump(summary, f, indent=2)
-
-    print(f"\nDone — {frame_idx} frames in {elapsed:.1f}s ({frame_idx / max(elapsed, 0.001):.1f} FPS)")
-    print(f"  Unique tracks: {len(track_ids_seen)}")
-    print(f"  Avg speed: {summary['avg_speed_kmh']} km/h, Max: {summary['max_speed_kmh']} km/h")
-    if max_queue_per_lane:
-        for lid, count in max_queue_per_lane.items():
-            print(f"  Max queue in {lid}: {count}")
-    print(f"\nResults saved to: {output_dir.resolve()}")
 
 
 def main():

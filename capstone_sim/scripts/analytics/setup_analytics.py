@@ -399,6 +399,67 @@ def define_lanes(frame, existing_lanes=None, skip_first_prompt=False):
     return lanes
 
 
+def define_forbidden_lines(frame, lanes=None, existing_lines=None, skip_first_prompt=False):
+    """Interactively define forbidden lines (e.g. stop lines) as 2-point segments.
+
+    A vehicle crossing one of these lines while the light is red is a violation.
+
+    Returns list of {'id': str, 'points': [[x1, y1], [x2, y2]]} dicts.
+    """
+    lines = list(existing_lines or [])
+    lanes = lanes or []
+
+    if lines:
+        print(f"\n{len(lines)} forbidden line(s) already defined:")
+        for ln in lines:
+            print(f"  - {ln['id']}")
+
+    print("\nDefine forbidden lines by clicking 2 points across the road (e.g. a stop line).")
+    print("A vehicle crossing the line while the light is RED counts as a violation.")
+
+    first_iter = True
+    while True:
+        if first_iter and skip_first_prompt:
+            choice = 'y'
+        else:
+            prompt = "\nAdd another forbidden line? [y/N]: " if lines else "\nAdd a forbidden line? [y/N]: "
+            choice = input(prompt).strip().lower()
+            default_yes = False
+            if choice == '':
+                choice = 'y' if default_yes else 'n'
+            if choice != 'y':
+                break
+        first_iter = False
+
+        line_id = input("  Line ID (e.g. stop_line_north): ").strip()
+        if not line_id:
+            print("  Skipped (no ID provided)")
+            continue
+
+        # Show frame with lanes and existing lines overlaid for context
+        preview = frame.copy()
+        for ln in lanes:
+            pts = np.array(ln['polygon'], dtype=np.int32)
+            cv2.polylines(preview, [pts], isClosed=True, color=(100, 100, 255), thickness=1)
+        for fl in lines:
+            p1, p2 = fl['points']
+            cv2.line(preview, tuple(p1), tuple(p2), (0, 0, 255), 2)
+
+        picker = PointPicker(preview, num_points=2, window_name=f"Define line: {line_id}")
+        pts = picker.pick()
+        if pts is None:
+            print(f"  Cancelled line {line_id}")
+            continue
+
+        lines.append({
+            'id': line_id,
+            'points': [[int(pts[0][0]), int(pts[0][1])], [int(pts[1][0]), int(pts[1][1])]],
+        })
+        print(f"  Added {line_id}.")
+
+    return lines
+
+
 def manual_calibrate(frame):
     """Run interactive 4-point homography calibration.
 
@@ -676,6 +737,8 @@ def main():
                         help='Redo calibration even if already present in config')
     parser.add_argument('--redo-lanes', action='store_true',
                         help='Wipe existing lanes and start fresh')
+    parser.add_argument('--redo-lines', action='store_true',
+                        help='Wipe existing forbidden lines and start fresh')
     args = parser.parse_args()
 
     frame, source_dir, source_label = resolve_source(args.source, args.frame)
@@ -795,6 +858,43 @@ def main():
             lanes = define_lanes(frame, existing_lanes=[])
             config['lanes'] = lanes
 
+    # --- Step 3: Forbidden Lines (for red-light violation detection) ---
+    print("\n" + "=" * 60)
+    print("Step 3: Forbidden Lines (stop lines)")
+    print("=" * 60)
+
+    current_lanes = config.get('lanes', [])
+    existing_lines = config.get('forbidden_lines', [])
+
+    if args.redo_lines:
+        print(f"  --redo-lines flag set: wiping {len(existing_lines)} existing line(s).")
+        lines = define_forbidden_lines(frame, lanes=current_lanes, existing_lines=[], skip_first_prompt=True)
+        config['forbidden_lines'] = lines
+    elif existing_lines:
+        print(f"  {len(existing_lines)} forbidden line(s) already defined:")
+        for ln in existing_lines:
+            print(f"    - {ln['id']}")
+        print("\nOptions:")
+        print("  [a] Add more lines (keep existing)")
+        print("  [r] Replace all — wipe existing and start fresh")
+        print("  [s] Skip — don't touch lines")
+        while True:
+            choice = input("Choice [a/r/s]: ").strip().lower()
+            if choice in ('a', 'r', 's'):
+                break
+            print("Invalid choice.")
+        if choice == 'r':
+            lines = define_forbidden_lines(frame, lanes=current_lanes, existing_lines=[], skip_first_prompt=True)
+            config['forbidden_lines'] = lines
+        elif choice == 'a':
+            lines = define_forbidden_lines(frame, lanes=current_lanes, existing_lines=existing_lines)
+            config['forbidden_lines'] = lines
+        # 's' = skip
+    else:
+        if _ask_yes_no("Add forbidden lines (for red-light violations)?", default_yes=False):
+            lines = define_forbidden_lines(frame, lanes=current_lanes, existing_lines=[])
+            config['forbidden_lines'] = lines
+
     # --- Save ---
     config['source'] = source_label
 
@@ -812,7 +912,8 @@ def main():
     print(f"\nConfig summary:")
     print(f"  Calibration: {config.get('calibration', {}).get('mode', 'NONE')}")
     print(f"  Lanes: {len(config.get('lanes', []))}")
-    print("\nNext: forbidden lines and entry zones (coming soon).")
+    print(f"  Forbidden lines: {len(config.get('forbidden_lines', []))}")
+    print("\nNext: highway entry zones (coming soon).")
 
 
 if __name__ == '__main__':

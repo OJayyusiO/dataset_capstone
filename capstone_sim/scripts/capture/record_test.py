@@ -36,6 +36,7 @@ from capstone_sim.scripts.utils.carla_helpers import (
     get_available_blueprints, build_class_blueprint_map, compute_target_counts,
     spawn_to_fill, despawn_far_vehicles,
 )
+from capstone_sim.scripts.utils.light_state import carla_state_to_str
 
 
 def get_gt_labels(current_vehicles, camera, K, image_w, image_h, camera_location):
@@ -191,6 +192,7 @@ def run_recording(config_path, output_base, duration, fps):
         spawn_radius = spawn_config.get('spawn_radius', 100.0)
         light_id = config.get('traffic_light', {}).get('id')
         light_location = None
+        selected_light = None
         if light_id:
             traffic_lights = list(world.get_actors().filter('traffic.traffic_light'))
             selected_light = next((l for l in traffic_lights if l.id == light_id), None)
@@ -236,6 +238,14 @@ def run_recording(config_path, output_base, duration, fps):
         last_check_positions = {}
         start_time = time.time()
 
+        # Per-frame traffic light state log (one row per saved image, keyed by frame index)
+        light_csv_file = open(recording_dir / 'light_states.csv', 'w', newline='')
+        light_csv_file.write('frame,state\n')
+        if selected_light is not None:
+            print(f"Logging traffic light {light_id} state per frame to light_states.csv")
+        else:
+            print("No traffic light selected; light_states.csv will record 'unknown'")
+
         print(f"\nRecording {total_frames} frames...")
         print("Press Ctrl+C to stop early\n")
 
@@ -251,6 +261,9 @@ def run_recording(config_path, output_base, duration, fps):
                 except queue.Empty:
                     pass
 
+            # Current traffic light state for this sim tick (same across cameras)
+            light_state = carla_state_to_str(selected_light.get_state()) if selected_light else 'unknown'
+
             # Warmup: record frames but don't spawn vehicles yet
             if frame < warmup_frames:
                 for ci, raw_img in enumerate(latest_images):
@@ -263,6 +276,7 @@ def run_recording(config_path, output_base, duration, fps):
                     cv2.imwrite(str(frames_dir / f"{prefix}{frame_counter:06d}.png"), img)
                     with open(gt_dir / f"{prefix}{frame_counter:06d}.txt", 'w') as f:
                         pass
+                    light_csv_file.write(f"{frame_counter},{light_state}\n")
                     frame_counter += 1
                 if frame == warmup_frames - 1:
                     print(f"Warmup complete ({warmup_frames} frames)")
@@ -367,6 +381,7 @@ def run_recording(config_path, output_base, duration, fps):
                     for label in labels:
                         f.write(label + '\n')
 
+                light_csv_file.write(f"{frame_counter},{light_state}\n")
                 frame_counter += 1
 
             # Progress
@@ -384,6 +399,12 @@ def run_recording(config_path, output_base, duration, fps):
         print("\n\nStopped by user")
 
     finally:
+        # Close the light state log
+        try:
+            light_csv_file.close()
+        except Exception:
+            pass
+
         # Save recording metadata first (before cleanup which may fail)
         # Include camera transforms (location + rotation) so analytics can compute
         # accurate ground-plane homography from camera intrinsics + extrinsics

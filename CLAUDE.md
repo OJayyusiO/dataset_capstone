@@ -95,17 +95,18 @@ capstone_sim/
 | Per-lane queue length (configurable speed + duration thresholds) | ✅ |
 | Live analytics on CARLA simulation | ✅ |
 | Stuck vehicle detection during long captures | ✅ |
-| `analytics_runs/<scenario>_<timestamp>/` output: per_track.csv, per_lane_queue.csv, summary.json, optional MP4 | ✅ |
+| `analytics_runs/<scenario>_<timestamp>/` output: per_track.csv, per_lane_queue.csv, violations.csv, summary.json, optional MP4 | ✅ |
+| Traffic light state plumbing (live CARLA actor / recorded CSV / YAML schedule) — `scripts/utils/light_state.py` | ✅ |
+| Forbidden-line picker (`setup_analytics.py` Step 3, `--redo-lines`) | ✅ |
+| Red-light violation detection (`ViolationDetector`, logs to violations.csv) | ✅ |
+| `k` toggle in live_analytics to make vehicles run reds for demos | ✅ |
 
 ## What's NOT done (next priorities)
 
-1. **Red-light violation detection** — needs forbidden line definition + light state input
-2. **Highway entry traffic light counting** — needs entry zones + light state from CARLA (user has explicit permission to read light state directly from the simulator, not from camera vision)
-3. **Collision detection** (stretch goal) — bbox overlap + speed drop; tunable, may be skipped
+1. **Highway entry traffic light counting** — needs entry zones + light state. Light state is already plumbed (`LightStateProvider`); just need entry-zone definition + counting logic grouped by light state.
+2. **Collision detection** (stretch goal) — bbox overlap + speed drop; tunable, may be skipped
 
-To build any of these, you need to first:
-- Plumb light state per frame into the analytics pipeline (CARLA: read from traffic light actor; real video: schedule in YAML)
-- Extend `setup_analytics.py` with a 2-point line picker (similar to existing polygon picker)
+Light state plumbing and the 2-point line picker are DONE (V3.0). Highway entry counting reuses both — define entry-zone polygons (like lanes) and count vehicles entering them grouped by `LightStateProvider.state_at()`.
 
 ## Reports and presentations
 
