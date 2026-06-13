@@ -547,12 +547,23 @@ def speed_color(speed_kmh):
     return (0, 0, 255)           # red (fast)
 
 
-def draw_detection(frame, bbox, class_id, track_id, conf, speed_kmh):
+def class_color(class_id):
+    """Box color (BGR) for a class id: our palette if known, else a stable
+    generated color so an arbitrary model's classes still get distinct colors."""
+    if class_id in CLASS_COLORS:
+        return CLASS_COLORS[class_id]
+    hue = int((class_id * 47) % 180)
+    bgr = cv2.cvtColor(np.uint8([[[hue, 200, 230]]]), cv2.COLOR_HSV2BGR)[0][0]
+    return (int(bgr[0]), int(bgr[1]), int(bgr[2]))
+
+
+def draw_detection(frame, bbox, class_id, track_id, conf, speed_kmh, class_names=None):
     x1, y1, x2, y2 = [int(v) for v in bbox]
-    box_color = CLASS_COLORS.get(class_id, (255, 255, 255))
+    box_color = class_color(class_id)
     cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
 
-    name = CLASS_NAMES.get(class_id, str(class_id))
+    names = class_names if class_names is not None else CLASS_NAMES
+    name = names.get(class_id, str(class_id))
     label = f"{name} #{track_id} {conf:.0%}"
     (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
     cv2.rectangle(frame, (x1, y1 - th - 6), (x1 + tw + 4, y1), box_color, -1)
@@ -635,6 +646,9 @@ def run(source_arg, model_path, output_dir, conf, iou, show, detect_collisions=F
     print("=" * 60)
 
     model = YOLO(model_path)
+    # Use the model's OWN class names so any trained model labels correctly,
+    # not just our 7-class model.
+    class_names = model.names
     speed_tracker = SpeedTracker(fps=fps, homography=H)
 
     # Output video
@@ -727,10 +741,10 @@ def run(source_arg, model_path, output_dir, conf, iou, show, detect_collisions=F
                         'world': world,
                     })
 
-                    draw_detection(frame, xyxy, cls, track_id, conf_score, speed_kmh)
+                    draw_detection(frame, xyxy, cls, track_id, conf_score, speed_kmh, class_names)
 
                     csv_writer.writerow([
-                        frame_idx, track_id, CLASS_NAMES.get(cls, cls),
+                        frame_idx, track_id, class_names.get(cls, cls),
                         round(world[0], 3), round(world[1], 3),
                         round(speed_mps, 3), round(speed_kmh, 1),
                     ])
