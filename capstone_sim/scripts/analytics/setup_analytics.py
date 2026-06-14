@@ -459,6 +459,65 @@ def define_entry_zones(frame, lanes=None, existing_zones=None, skip_first_prompt
     return zones
 
 
+def define_forbidden_zones(frame, lanes=None, existing_zones=None, skip_first_prompt=False):
+    """Interactively define forbidden (no-go) zones as polygons — e.g. the painted
+    chevron / gore area at a highway ramp. Any vehicle that drives into the zone is
+    flagged as a violation (no traffic-light state needed).
+
+    Returns list of {'id': str, 'polygon': [[x, y], ...]} dicts.
+    """
+    zones = list(existing_zones or [])
+    lanes = lanes or []
+
+    if zones:
+        print(f"\n{len(zones)} forbidden zone(s) already defined:")
+        for z in zones:
+            print(f"  - {z['id']}")
+
+    print("\nDefine forbidden zones by clicking polygon corners around each no-go area")
+    print("(e.g. the chevron gore at a highway ramp). Any vehicle entering is flagged.")
+
+    first_iter = True
+    while True:
+        if first_iter and skip_first_prompt:
+            choice = 'y'
+        else:
+            prompt = "\nAdd another forbidden zone? [y/N]: " if zones else "\nAdd a forbidden zone? [y/N]: "
+            choice = input(prompt).strip().lower()
+            if choice == '':
+                choice = 'n'
+            if choice != 'y':
+                break
+        first_iter = False
+
+        zone_id = input("  Forbidden zone ID (e.g. ramp_chevron): ").strip()
+        if not zone_id:
+            print("  Skipped (no ID provided)")
+            continue
+
+        preview = frame.copy()
+        for ln in lanes:
+            pts = np.array(ln['polygon'], dtype=np.int32)
+            cv2.polylines(preview, [pts], isClosed=True, color=(100, 100, 255), thickness=1)
+        for z in zones:
+            pts = np.array(z['polygon'], dtype=np.int32)
+            cv2.polylines(preview, [pts], isClosed=True, color=(0, 0, 255), thickness=2)
+
+        picker = PolygonPicker(preview, window_name=f"Define forbidden zone: {zone_id}")
+        polygon = picker.pick()
+        if polygon is None:
+            print(f"  Cancelled zone {zone_id}")
+            continue
+
+        zones.append({
+            'id': zone_id,
+            'polygon': [[int(x), int(y)] for (x, y) in polygon],
+        })
+        print(f"  Added {zone_id} with {len(polygon)} corners.")
+
+    return zones
+
+
 def define_forbidden_lines(frame, lanes=None, existing_lines=None, skip_first_prompt=False):
     """Interactively define forbidden lines (e.g. stop lines) as 2-point segments.
 
@@ -801,6 +860,8 @@ def main():
                         help='Wipe existing forbidden lines and start fresh')
     parser.add_argument('--redo-entry-zones', action='store_true',
                         help='Wipe existing highway entry zones and start fresh')
+    parser.add_argument('--redo-forbidden-zones', action='store_true',
+                        help='Wipe existing forbidden (no-go) zones and start fresh')
     args = parser.parse_args()
 
     frame, source_dir, source_label = resolve_source(args.source, args.frame)
@@ -992,6 +1053,42 @@ def main():
         if _ask_yes_no("Add highway entry zones (for entry counting)?", default_yes=False):
             zones = define_entry_zones(frame, lanes=current_lanes, existing_zones=[])
             config['entry_zones'] = zones
+
+    # --- Step 5: Forbidden Zones (no-go polygons, e.g. ramp chevron) ---
+    print("\n" + "=" * 60)
+    print("Step 5: Forbidden Zones (no-go polygons)")
+    print("=" * 60)
+
+    existing_fzones = config.get('forbidden_zones', [])
+
+    if args.redo_forbidden_zones:
+        print(f"  --redo-forbidden-zones flag set: wiping {len(existing_fzones)} existing zone(s).")
+        fzones = define_forbidden_zones(frame, lanes=current_lanes, existing_zones=[], skip_first_prompt=True)
+        config['forbidden_zones'] = fzones
+    elif existing_fzones:
+        print(f"  {len(existing_fzones)} forbidden zone(s) already defined:")
+        for z in existing_fzones:
+            print(f"    - {z['id']}")
+        print("\nOptions:")
+        print("  [a] Add more zones (keep existing)")
+        print("  [r] Replace all — wipe existing and start fresh")
+        print("  [s] Skip — don't touch forbidden zones")
+        while True:
+            choice = input("Choice [a/r/s]: ").strip().lower()
+            if choice in ('a', 'r', 's'):
+                break
+            print("Invalid choice.")
+        if choice == 'r':
+            fzones = define_forbidden_zones(frame, lanes=current_lanes, existing_zones=[], skip_first_prompt=True)
+            config['forbidden_zones'] = fzones
+        elif choice == 'a':
+            fzones = define_forbidden_zones(frame, lanes=current_lanes, existing_zones=existing_fzones)
+            config['forbidden_zones'] = fzones
+        # 's' = skip
+    else:
+        if _ask_yes_no("Add forbidden zones (no-go areas like a ramp chevron)?", default_yes=False):
+            fzones = define_forbidden_zones(frame, lanes=current_lanes, existing_zones=[])
+            config['forbidden_zones'] = fzones
 
     # --- Save ---
     config['source'] = source_label
