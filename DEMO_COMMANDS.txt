@@ -1,47 +1,93 @@
+==========================================================================
+ LIVE ANALYTICS ON CARLA  (headline demo)
+==========================================================================
+# Detect + track vehicles live in CARLA with speed, per-lane queue,
+# red-light violations, and highway entry counting.
+# Press 'k' to make vehicles run red lights (triggers the violation demo);
+# press 'k' again to make them obey again.
 python capstone_sim/scripts/analytics/live_analytics.py capstone_sim/configs/Town6_1cam_test.yaml capstone_sim/models/yolov11m/best.pt
 
-# Same demo but also save the annotated feed to MP4:
-python capstone_sim/scripts/analytics/live_analytics.py capstone_sim/configs/Town6_1cam_test.yaml capstone_sim/models/yolov11m/best.pt --save-video
+# Same demo, but also save the annotated feed to MP4 and enable collision detection:
+python capstone_sim/scripts/analytics/live_analytics.py capstone_sim/configs/Town6_1cam_test.yaml capstone_sim/models/yolov11m/best.pt --save-video --collisions
+
+# Other live flags: --no-spawn (don't spawn traffic), --conf 0.25, --iou 0.5,
+#                   --config <analytics_config.yaml>, --output <dir>
+# Output goes to:  capstone_sim/analytics_runs/<scenario>_<timestamp>/
+#                  (per_track.csv, per_lane_queue.csv, violations.csv,
+#                   entries.csv, collisions.csv, summary.json, optional MP4)
 
 
+==========================================================================
+ ANALYTICS ON A RECORDED FOLDER OR VIDEO  (not live)
+==========================================================================
+# Outputs annotated.mp4 + per_track.csv, per_lane_queue.csv, violations.csv,
+# entries.csv, and (with --collisions) collisions.csv in <source>/analytics_output/.
+python capstone_sim/scripts/analytics/traffic_analytics.py test_recordings/<recording_dir> capstone_sim/models/yolov11m/best.pt
+python capstone_sim/scripts/analytics/traffic_analytics.py <path_to_video.mp4> capstone_sim/models/yolov11m/best.pt --collisions
+
+# Works with ANY Ultralytics YOLO model (labels come from the model's own class
+# names), e.g. a teammate's real-world model:
+python capstone_sim/scripts/analytics/traffic_analytics.py <video.mp4> <other_model.pt>
+
+
+==========================================================================
+ RUN MODEL ON A VIDEO / WEBCAM  (detection only)
+==========================================================================
 python capstone_sim/scripts/evaluate/inference.py --model capstone_sim/models/yolov11m/best.pt --source <path_to_video.mp4>
 
-
-
-RUN MODEL ON LIVE WEBCAM:
-
-# Source = "0" means the default webcam. Press 'q' to stop.
-
+# Source "0" = default webcam. Press 'q' to stop.
 python capstone_sim/scripts/evaluate/inference.py --model capstone_sim/models/yolov11m/best.pt --source 0 --show
 
 
-RECORD NEW TEST FOOTAGE FROM CARLA (re-create a recording):
+==========================================================================
+ CALIBRATION + REGION SETUP  (lanes, violation lines, entry zones)
+==========================================================================
+# Calibration auto-runs from the scenario's camera params (manual 4-point for
+# real video). Steps through: lanes -> violation lines -> entry zones.
+python capstone_sim/scripts/analytics/setup_analytics.py capstone_sim/configs/Town6_1cam_test.yaml
+
+# Redo a specific layer:
+python capstone_sim/scripts/analytics/setup_analytics.py capstone_sim/configs/Town6_1cam_test.yaml --redo-lanes
+python capstone_sim/scripts/analytics/setup_analytics.py capstone_sim/configs/Town6_1cam_test.yaml --redo-lines
+python capstone_sim/scripts/analytics/setup_analytics.py capstone_sim/configs/Town6_1cam_test.yaml --redo-entry-zones
+
+# Force recalibration / manual 4-point calibration (real video):
+python capstone_sim/scripts/analytics/setup_analytics.py capstone_sim/configs/Town6_1cam_test.yaml --recalibrate
+python capstone_sim/scripts/analytics/setup_analytics.py <video.mp4> --manual
+
+
+==========================================================================
+ RECORD NEW TEST FOOTAGE FROM CARLA
+==========================================================================
 python capstone_sim/scripts/capture/record_test.py capstone_sim/configs/Town6_1cam_test.yaml
 
 
-
-RUN ANALYTICS ON A RECORDED FOLDER (not live)
-
-python capstone_sim/scripts/analytics/traffic_analytics.py test_recordings/<recording_dir> capstone_sim/models/yolov11m/best.pt
-
-
-
-EVALUATE THE MODEL ON A TEST RECORDING (detection + tracking metrics):
-# Produces: annotated.mp4, metrics_summary.json, per_frame_metrics.csv,
-# charts, confusion matrix, and a self-contained report.html.
+==========================================================================
+ EVALUATE THE MODEL  (detection + tracking metrics)
+==========================================================================
+# Produces annotated.mp4, metrics_summary.json, per_frame_metrics.csv, charts,
+# confusion matrix, and a self-contained report.html.
 python capstone_sim/scripts/evaluate/evaluate_model.py test_recordings/<recording_dir> capstone_sim/models/yolov11m/best.pt
 
 
-DEFINE NEW LANES OR RECALIBRATE (only needed if changing scenario):
-# Calibration auto-runs from the scenario's camera params.
-# Use --redo-lanes to wipe and redefine lanes interactively.
+==========================================================================
+ VISION INTEGRATION INTO THE TRaffic DASHBOARD  (CARLA mode)
+==========================================================================
+# Lives in the TRaffic repo, branch merge/master-with-integrated.
+# Full run/test guide: VISION_INTEGRATION.md at that repo root.
+# Quick demo:
+#   1. Start CARLA, the backend, and the dashboard (see VISION_INTEGRATION.md).
+#   2. Dashboard -> mode = CARLA -> Start.
+#   3. Click an intersection -> Cameras tab -> pick an approach (N/E/S/W).
+#   4. Click "Vision: on" to run our model on that camera (boxes, classes,
+#      emergency vehicles, speed). That intersection's queue + emergencies on
+#      the map come from vision; the other intersections stay on ground truth.
+#   5. "Edit regions" to draw lane polygons + violation lines on the live feed.
 
-python capstone_sim/scripts/analytics/setup_analytics.py capstone_sim/configs/Town6_1cam_test.yaml --redo-lanes
 
-
-
-USEFUL UTILITIES:
-
+==========================================================================
+ USEFUL UTILITIES
+==========================================================================
 # Switch map manually
 python capstone_sim/scripts/utils/switch_map.py Town06
 
@@ -53,6 +99,3 @@ python capstone_sim/scripts/utils/visualize_traffic_lights.py
 
 # Convert PNG frame sequence to MP4
 python capstone_sim/scripts/utils/frames_to_video.py test_recordings/<recording_dir>/frames
-
-
-

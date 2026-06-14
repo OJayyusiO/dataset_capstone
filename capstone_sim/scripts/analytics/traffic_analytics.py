@@ -28,6 +28,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from capstone_sim.scripts.utils.constants import CLASS_NAMES, CLASS_COLORS
 from capstone_sim.scripts.utils.light_state import LightStateProvider, draw_light_indicator
+from capstone_sim.scripts.utils.video import open_video_writer
 
 try:
     from ultralytics import YOLO
@@ -431,6 +432,58 @@ def draw_entry_zones(frame, zones, entry_counter):
 
 
 # --------------------------------------------------------------------------- #
+# Forbidden zones (no-go polygons, e.g. the chevron gore at a highway ramp)
+# --------------------------------------------------------------------------- #
+
+class ForbiddenZoneDetector:
+    """Flags a vehicle that drives into a forbidden zone polygon (e.g., the
+    painted chevron / gore area at a highway ramp). Unlike red-light violations
+    this needs no traffic-light state — the zone is always off-limits. Each
+    (track_id, zone_id) is counted once."""
+
+    def __init__(self, zones):
+        self.zones = zones or []
+        self.flagged = set()  # (track_id, zone_id) already counted
+
+    def check(self, detections, frame_idx):
+        """Return new forbidden-zone entries this frame: [{track_id, zone_id, frame}]."""
+        new = []
+        for det in detections:
+            tid = det['track_id']
+            p = det['point']
+            for zone in self.zones:
+                key = (tid, zone['id'])
+                if key in self.flagged:
+                    continue
+                if point_in_polygon(p, zone['polygon']):
+                    self.flagged.add(key)
+                    new.append({'track_id': tid, 'zone_id': zone['id'], 'frame': frame_idx})
+        return new
+
+
+def draw_forbidden_zones(frame, zones, active=False):
+    """Draw forbidden-zone polygons in red; brighter/thicker when one just fired."""
+    if not zones:
+        return
+    overlay = frame.copy()
+    for zone in zones:
+        poly = np.array(zone['polygon'], dtype=np.int32)
+        cv2.fillPoly(overlay, [poly], (0, 0, 220))
+    cv2.addWeighted(overlay, 0.40 if active else 0.20, frame, 0.60 if active else 0.80, 0, frame)
+    for zone in zones:
+        poly = np.array(zone['polygon'], dtype=np.int32)
+        cv2.polylines(frame, [poly], isClosed=True, color=(0, 0, 255),
+                      thickness=4 if active else 2)
+        centroid = poly.mean(axis=0).astype(int)
+        label = f"NO-GO {zone['id']}"
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
+        cv2.rectangle(frame, (centroid[0] - 5, centroid[1] - th - 6),
+                      (centroid[0] + tw + 5, centroid[1] + 6), (0, 0, 200), -1)
+        cv2.putText(frame, label, (centroid[0], centroid[1]),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
+
+
+# --------------------------------------------------------------------------- #
 # Collision detection (experimental / opt-in)
 # --------------------------------------------------------------------------- #
 
@@ -547,12 +600,23 @@ def speed_color(speed_kmh):
     return (0, 0, 255)           # red (fast)
 
 
-def draw_detection(frame, bbox, class_id, track_id, conf, speed_kmh):
+def class_color(class_id):
+    """Box color (BGR) for a class id: our palette if known, else a stable
+    generated color so an arbitrary model's classes still get distinct colors."""
+    if class_id in CLASS_COLORS:
+        return CLASS_COLORS[class_id]
+    hue = int((class_id * 47) % 180)
+    bgr = cv2.cvtColor(np.uint8([[[hue, 200, 230]]]), cv2.COLOR_HSV2BGR)[0][0]
+    return (int(bgr[0]), int(bgr[1]), int(bgr[2]))
+
+
+def draw_detection(frame, bbox, class_id, track_id, conf, speed_kmh, class_names=None):
     x1, y1, x2, y2 = [int(v) for v in bbox]
-    box_color = CLASS_COLORS.get(class_id, (255, 255, 255))
+    box_color = class_color(class_id)
     cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
 
-    name = CLASS_NAMES.get(class_id, str(class_id))
+    names = class_names if class_names is not None else CLASS_NAMES
+    name = names.get(class_id, str(class_id))
     label = f"{name} #{track_id} {conf:.0%}"
     (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
     cv2.rectangle(frame, (x1, y1 - th - 6), (x1 + tw + 4, y1), box_color, -1)
@@ -606,6 +670,10 @@ def run(source_arg, model_path, output_dir, conf, iou, show, detect_collisions=F
     entry_zones = config.get('entry_zones', [])
     entry_counter = EntryCounter(entry_zones)
 
+    # Forbidden zones (no-go polygons, e.g. chevron gore at a ramp) — violation on entry
+    forbidden_zones = config.get('forbidden_zones', [])
+    fzone_detector = ForbiddenZoneDetector(forbidden_zones)
+
     # Collision detection (opt-in via --collisions; thresholds from `collision:` config)
     collision_detector = None
     if detect_collisions:
@@ -630,18 +698,20 @@ def run(source_arg, model_path, output_dir, conf, iou, show, detect_collisions=F
     print(f"Light state: {'available (' + light_provider.mode + ')' if light_provider.available else 'none'}")
     print(f"Forbidden lines: {len(forbidden_lines)}")
     print(f"Entry zones: {len(entry_zones)}")
+    print(f"Forbidden zones: {len(forbidden_zones)}")
     print(f"Collision detection: {'ON' if collision_detector else 'off'}")
     print(f"Output:      {output_dir.resolve()}")
     print("=" * 60)
 
     model = YOLO(model_path)
+    # Use the model's OWN class names so any trained model labels correctly,
+    # not just our 7-class model.
+    class_names = model.names
     speed_tracker = SpeedTracker(fps=fps, homography=H)
 
-    # Output video
+    # Output video (H.264 so it embeds in an HTML5 <video> tag; falls back to mp4v)
     output_video = output_dir / 'analytics.mp4'
-    writer = cv2.VideoWriter(str(output_video),
-                             cv2.VideoWriter_fourcc(*'mp4v'),
-                             fps, (width, height))
+    writer, _ = open_video_writer(output_video, fps, (width, height))
 
     # CSV log per track
     csv_path = output_dir / 'per_track.csv'
@@ -676,6 +746,15 @@ def run(source_arg, model_path, output_dir, conf, iou, show, detect_collisions=F
         entry_csv_writer = csv.writer(entry_csv_file)
         entry_csv_writer.writerow(['frame', 'track_id', 'zone_id', 'light_state'])
 
+    # CSV log of forbidden-zone violations
+    fzone_csv_file = None
+    fzone_csv_writer = None
+    if forbidden_zones:
+        fzone_csv_path = output_dir / 'forbidden_zones.csv'
+        fzone_csv_file = open(fzone_csv_path, 'w', newline='')
+        fzone_csv_writer = csv.writer(fzone_csv_file)
+        fzone_csv_writer.writerow(['frame', 'track_id', 'zone_id'])
+
     # CSV log of collisions
     collision_csv_file = None
     collision_csv_writer = None
@@ -690,6 +769,7 @@ def run(source_arg, model_path, output_dir, conf, iou, show, detect_collisions=F
     track_ids_seen = set()
     total_violations = 0
     total_entries = 0
+    total_fzone = 0
     total_collisions = 0
 
     try:
@@ -727,10 +807,10 @@ def run(source_arg, model_path, output_dir, conf, iou, show, detect_collisions=F
                         'world': world,
                     })
 
-                    draw_detection(frame, xyxy, cls, track_id, conf_score, speed_kmh)
+                    draw_detection(frame, xyxy, cls, track_id, conf_score, speed_kmh, class_names)
 
                     csv_writer.writerow([
-                        frame_idx, track_id, CLASS_NAMES.get(cls, cls),
+                        frame_idx, track_id, class_names.get(cls, cls),
                         round(world[0], 3), round(world[1], 3),
                         round(speed_mps, 3), round(speed_kmh, 1),
                     ])
@@ -768,6 +848,17 @@ def run(source_arg, model_path, output_dir, conf, iou, show, detect_collisions=F
                         entry_csv_writer.writerow([e['frame'], e['track_id'], e['zone_id'], e['light_state']])
                 draw_entry_zones(frame, entry_zones, entry_counter)
 
+            # Forbidden-zone violations (no-go polygons; no light state needed)
+            fzone_now = []
+            if forbidden_zones:
+                fzone_now = fzone_detector.check(frame_detections, frame_idx)
+                for fz in fzone_now:
+                    total_fzone += 1
+                    if fzone_csv_writer:
+                        fzone_csv_writer.writerow([fz['frame'], fz['track_id'], fz['zone_id']])
+                    print(f"  FORBIDDEN ZONE: track #{fz['track_id']} entered {fz['zone_id']} (frame {frame_idx})")
+                draw_forbidden_zones(frame, forbidden_zones, active=bool(fzone_now))
+
             # Collision detection (experimental)
             collisions_now = []
             if collision_detector:
@@ -784,9 +875,13 @@ def run(source_arg, model_path, output_dir, conf, iou, show, detect_collisions=F
             if light_provider.available:
                 draw_light_indicator(frame, light_state)
 
-            # Violation banner
+            # Violation banner (red-light line crossing or forbidden-zone entry)
+            vtxt = None
             if violations_now:
                 vtxt = f"RED-LIGHT VIOLATION x{len(violations_now)}"
+            elif fzone_now:
+                vtxt = f"FORBIDDEN ZONE x{len(fzone_now)}"
+            if vtxt:
                 (tw, th), _ = cv2.getTextSize(vtxt, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)
                 cv2.rectangle(frame, (width // 2 - tw // 2 - 12, 50),
                               (width // 2 + tw // 2 + 12, 50 + th + 16), (0, 0, 255), -1)
@@ -799,6 +894,8 @@ def run(source_arg, model_path, output_dir, conf, iou, show, detect_collisions=F
             hud = f"Frame {frame_idx}  |  {inference_fps:.1f} FPS  |  Tracks: {len(track_ids_seen)}  |  Violations: {total_violations}"
             if entry_zones:
                 hud += f"  |  Entries: {total_entries}"
+            if forbidden_zones:
+                hud += f"  |  No-go: {total_fzone}"
             if collision_detector:
                 hud += f"  |  Collisions: {total_collisions}"
             cv2.putText(frame, hud, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
@@ -826,6 +923,8 @@ def run(source_arg, model_path, output_dir, conf, iou, show, detect_collisions=F
             violation_csv_file.close()
         if entry_csv_file:
             entry_csv_file.close()
+        if fzone_csv_file:
+            fzone_csv_file.close()
         if collision_csv_file:
             collision_csv_file.close()
         if show:
@@ -838,6 +937,8 @@ def run(source_arg, model_path, output_dir, conf, iou, show, detect_collisions=F
         print(f"  Red-light violations: {total_violations}")
     if entry_zones:
         print(f"  Entry counts: {entry_counter.summary()}")
+    if forbidden_zones:
+        print(f"  Forbidden-zone violations: {total_fzone}")
     if collision_detector:
         print(f"  Collisions detected: {total_collisions}")
     print(f"  Video:        {output_video.resolve()}")

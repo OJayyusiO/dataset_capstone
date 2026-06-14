@@ -40,6 +40,7 @@ from capstone_sim.scripts.utils.carla_helpers import (
     spawn_to_fill, despawn_far_vehicles,
 )
 from capstone_sim.scripts.utils.light_state import LightStateProvider, draw_light_indicator
+from capstone_sim.scripts.utils.video import open_video_writer
 from capstone_sim.scripts.analytics.setup_analytics import auto_calibrate_from_carla
 from capstone_sim.scripts.analytics.traffic_analytics import (
     SpeedTracker, QueueTracker, draw_detection, pixel_to_world,
@@ -249,9 +250,7 @@ def run(scenario_path, model_path, save_video, spawn_traffic, conf, iou,
 
         if save_video:
             video_path = output_dir / 'live_analytics.mp4'
-            writer = cv2.VideoWriter(str(video_path),
-                                     cv2.VideoWriter_fourcc(*'mp4v'),
-                                     fps, (image_w, image_h))
+            writer, _ = open_video_writer(video_path, fps, (image_w, image_h))
 
         # CSV loggers
         csv_path = output_dir / 'per_track.csv'
