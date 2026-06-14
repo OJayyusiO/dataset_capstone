@@ -28,6 +28,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from capstone_sim.scripts.utils.constants import CLASS_NAMES, CLASS_COLORS
 from capstone_sim.scripts.utils.light_state import LightStateProvider, draw_light_indicator
+from capstone_sim.scripts.utils.video import open_video_writer
 
 try:
     from ultralytics import YOLO
@@ -708,11 +709,9 @@ def run(source_arg, model_path, output_dir, conf, iou, show, detect_collisions=F
     class_names = model.names
     speed_tracker = SpeedTracker(fps=fps, homography=H)
 
-    # Output video
+    # Output video (H.264 so it embeds in an HTML5 <video> tag; falls back to mp4v)
     output_video = output_dir / 'analytics.mp4'
-    writer = cv2.VideoWriter(str(output_video),
-                             cv2.VideoWriter_fourcc(*'mp4v'),
-                             fps, (width, height))
+    writer, _ = open_video_writer(output_video, fps, (width, height))
 
     # CSV log per track
     csv_path = output_dir / 'per_track.csv'
