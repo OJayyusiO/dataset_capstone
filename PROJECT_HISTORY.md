@@ -222,7 +222,7 @@ Set up YOLOv12, added tracking options, then began researching fine-tuning when 
 - Separate `dataset_root` from training code — keeps datasets out of the repo
 
 ### March 30, 2026 — Last Activity Before Migration
-**Commits:** `04ddac8`/`efe743e` "claude" (cleanup commits)
+**Commits:** `04ddac8`/`efe743e` (cleanup commits)
 
 **What happened:** The team began transitioning to a new repo structure. Two commits with placeholder names cleaned up the worktree before the repo was eventually deleted.
 
@@ -258,14 +258,13 @@ From the original repo into `dataset_capstone`:
 - Prototype scripts dumped in `capstone_sim/Code/`
 - Single-camera, single-weather scenarios only
 - Corrupted `environment.yml` (UTF-16 encoding artifacts)
-- `.claude/` folder accidentally tracked in git
 - Several test/scratch files mixed in with production code
 - Stray `scenario_config.yaml` at repo root
 
 ### Actions Taken
 1. **Cleaned up the repository** — Removed unused files: `test_1.py`, `better_test_system.py`, `QUICK_REFERENCE.md`, `run_scenario.py`, `launch_carla_quality.bat`
 2. **Fixed environment.yml** — Replaced corrupted file with a clean conda environment specification
-3. **Added .gitignore** — Excluded `.claude/`, `dataset_output/`, `CARLA_0.9.16/`, training runs
+3. **Added .gitignore** — Excluded `dataset_output/`, `CARLA_0.9.16/`, training runs
 4. **Rewrote README** — Documented full setup procedure (CARLA install, conda env, usage)
 5. **Made setup_scenario.py output configs to a sensible location** (next to the script)
 
